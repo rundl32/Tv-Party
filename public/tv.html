@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TV Party · Screen</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #14121f; color: #f4f1ea;
+               font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; cursor: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  .lobby { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+           background: rgba(20, 18, 31, .86); transition: opacity .4s; }
+  .lobby.hidden { opacity: 0; pointer-events: none; }
+  .card { display: flex; gap: 5vw; align-items: center; }
+  .qr { width: 30vh; height: 30vh; background: #fff; border-radius: 16px; padding: 1.5vh; }
+  .qr img { width: 100%; height: 100%; display: block; }
+  .how { font-size: 3.2vh; line-height: 1.4; color: #b9b3c9; }
+  .how b { color: #f4f1ea; }
+  .code { font-size: 14vh; font-weight: 800; letter-spacing: .06em; color: #ffd166; line-height: 1.05; margin: 1vh 0 2vh; }
+  .players { margin-top: 2vh; font-size: 2.8vh; min-height: 4vh; }
+  .chip { display: inline-block; padding: .4vh 1.4vh; border-radius: 99px; margin: .4vh .6vh 0 0; color: #14121f; font-weight: 700; }
+  .status { position: fixed; top: 2vh; left: 50%; transform: translateX(-50%); padding: .8vh 2vh;
+            border-radius: 99px; background: #ef476f; color: #fff; font-size: 2.4vh; display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="lobby" id="lobby">
+  <div class="card">
+    <div class="qr"><img id="qr" alt=""></div>
+    <div class="how">
+      On your phone, scan the QR code or open<br>
+      <b id="joinUrl"></b><br>and enter this code:
+      <div class="code" id="code">------</div>
+      <div>Move with the joystick. Grab ★ stars. Tap <b>DASH</b> to bump friends.</div>
+      <div class="players" id="lobbyPlayers">Waiting for players…</div>
+    </div>
+  </div>
+</div>
+<div class="status" id="status">Reconnecting…</div>
+
+<script src="/net.js"></script>
+<script>
+(function () {
+  // ---------- room ----------
+  var room = null;
+  try { room = sessionStorage.getItem('tvp-room'); } catch (e) {}
+  if (!room || !/^\d{6}$/.test(room)) {
+    room = String(100000 + Math.floor(Math.random() * 900000));
+    try { sessionStorage.setItem('tvp-room', room); } catch (e) {}
+  }
+  var pretty = room.slice(0, 3) + ' ' + room.slice(3);
+  document.getElementById('code').textContent = pretty;
+  document.getElementById('joinUrl').textContent = location.host + '/play';
+  document.getElementById('qr').src = '/api/qr?room=' + room;
+
+  // ---------- game constants ----------
+  var W = 1600, H = 900;
+  var R = 34, STAR_R = 22, SPEED = 520, DASH_SPEED = 1400, DASH_TIME = 0.16, DASH_CD = 1.1;
+  var WIN_SCORE = 15, STAR_COUNT = 3;
+  var COLORS = ['#ff6b6b', '#ffd166', '#06d6a0', '#4cc9f0', '#b388ff', '#ff9f1c', '#f72585', '#90be6d', '#e9c46a', '#8ecae6'];
+
+  var players = {};   // id -> player
+  var stars = [];
+  var winner = null;  // { name, color, until }
+  var particles = [];
+
+  function now() { return performance.now(); }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function num(v) { v = Number(v); return isFinite(v) ? v : 0; }
+
+  function freeColor() {
+    var used = {};
+    for (var id in players) used[players[id].color] = true;
+    for (var i = 0; i < COLORS.length; i++) if (!used[COLORS[i]]) return COLORS[i];
+    return COLORS[Math.floor(Math.random() * COLORS.length)];
+  }
+
+  function spawnStar() {
+    return { x: 120 + Math.random() * (W - 240), y: 120 + Math.random() * (H - 240), born: now() };
+  }
+  while (stars.length < STAR_COUNT) stars.push(spawnStar());
+
+  // ---------- networking ----------
+  var sock = new RoomSocket({ role: 'screen', room: room }, {
+    open: function () {
+      setStatus(true);
+      sock.send({ t: 'screen-online' }); // phones re-join after the TV reconnects
+    },
+    close: function () { setStatus(false); },
+    message: onMessage
+  });
+
+  function setStatus(ok) { document.getElementById('status').style.display = ok ? 'none' : 'block'; }
+
+  function send(to, msg) { msg.to = to; sock.send(msg); }
+
+  function onMessage(m) {
+    var p = m.from ? players[m.from] : null;
+    switch (m.t) {
+      case 'join': {
+        var name = String(m.name || 'Player').replace(/\s+/g, ' ').trim().slice(0, 12) || 'Player';
+        if (!p) {
+          p = players[m.from] = {
+            id: m.from, name: name, color: freeColor(), score: 0,
+            x: 200 + Math.random() * (W - 400), y: 200 + Math.random() * (H - 400),
+            vx: 0, vy: 0, jx: 0, jy: 0, a: false,
+            dashT: 0, dashCd: 0, dx: 1, dy: 0, stun: 0, removeAt: 0, joinedAt: now()
+          };
+          burst(p.x, p.y, p.color, 24);
+        }
+        p.name = name;
+        p.cid = m.cid;
+        p.removeAt = 0;
+        var isNew = !p.welcomed; p.welcomed = true;
+        send(m.from, { t: 'welcome', color: p.color, name: p.name, score: p.score });
+        renderLobby(isNew);
+        break;
+      }
+      case 'in': {
+        if (!p) { send(m.from, { t: 'rejoin' }); return; }
+        p.cid = m.cid;
+        p.removeAt = 0;
+        var x = clamp(num(m.x), -1, 1), y = clamp(num(m.y), -1, 1);
+        var len = Math.sqrt(x * x + y * y);
+        if (len > 1) { x /= len; y /= len; }
+        p.jx = x; p.jy = y;
+        var a = !!m.a;
+        if (a && !p.a) tryDash(p);
+        p.a = a;
+        break;
+      }
+      case 'leave': {
+        // Ignore a 'leave' from an old connection if the phone already reconnected.
+        if (p && p.cid === m.cid) p.removeAt = now() + 8000;
+        break;
+      }
+    }
+  }
+
+  function tryDash(p) {
+    if (p.dashCd > 0 || p.stun > 0) return;
+    var dx = p.jx, dy = p.jy;
+    var len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 0.2) { dx = p.dx; dy = p.dy; len = 1; }
+    p.dx = dx / len; p.dy = dy / len;
+    p.dashT = DASH_TIME;
+    p.dashCd = DASH_CD;
+    send(p.id, { t: 'buzz', ms: 25 });
+  }
+
+  // ---------- lobby ----------
+  var lobbyEl = document.getElementById('lobby');
+  var lobbyPlayersEl = document.getElementById('lobbyPlayers');
+  var lobbyForcedUntil = 0;
+
+  function renderLobby(flash) {
+    var ids = Object.keys(players);
+    lobbyPlayersEl.textContent = '';
+    if (!ids.length) { lobbyPlayersEl.textContent = 'Waiting for players…'; return; }
+    ids.forEach(function (id) {
+      var s = document.createElement('span');
+      s.className = 'chip';
+      s.style.background = players[id].color;
+      s.textContent = players[id].name;
+      lobbyPlayersEl.appendChild(s);
+    });
+    // Show who joined for a moment, then reveal the game.
+    if (flash) lobbyForcedUntil = now() + 1500;
+  }
+
+  // ---------- simulation ----------
+  function update(dt) {
+    var t = now();
+    var ids = Object.keys(players);
+
+    for (var i = 0; i < ids.length; i++) {
+      var p = players[ids[i]];
+      if (p.removeAt && t > p.removeAt) { delete players[p.id]; renderLobby(); continue; }
+
+      p.dashCd = Math.max(0, p.dashCd - dt);
+      p.stun = Math.max(0, p.stun - dt);
+
+      var tx = p.stun > 0 ? 0 : p.jx * SPEED;
+      var ty = p.stun > 0 ? 0 : p.jy * SPEED;
+      var k = Math.min(1, dt * (p.stun > 0 ? 2 : 10));
+      p.vx += (tx - p.vx) * k;
+      p.vy += (ty - p.vy) * k;
+
+      if (Math.abs(p.jx) + Math.abs(p.jy) > 0.2) {
+        var l = Math.sqrt(p.jx * p.jx + p.jy * p.jy);
+        p.dx = p.jx / l; p.dy = p.jy / l;
+      }
+
+      var mx = p.vx, my = p.vy;
+      if (p.dashT > 0) {
+        p.dashT -= dt;
+        mx = p.dx * DASH_SPEED; my = p.dy * DASH_SPEED;
+        if (Math.random() < 0.8) particles.push({ x: p.x, y: p.y, vx: 0, vy: 0, life: 0.3, max: 0.3, color: p.color, r: R * 0.8 });
+      }
+      p.x += mx * dt;
+      p.y += my * dt;
+
+      if (p.x < R) { p.x = R; p.vx = Math.abs(p.vx) * 0.5; }
+      if (p.x > W - R) { p.x = W - R; p.vx = -Math.abs(p.vx) * 0.5; }
+      if (p.y < R) { p.y = R; p.vy = Math.abs(p.vy) * 0.5; }
+      if (p.y > H - R) { p.y = H - R; p.vy = -Math.abs(p.vy) * 0.5; }
+    }
+
+    // player vs player
+    ids = Object.keys(players);
+    for (var a = 0; a < ids.length; a++) {
+      for (var b = a + 1; b < ids.length; b++) {
+        var p1 = players[ids[a]], p2 = players[ids[b]];
+        var dx = p2.x - p1.x, dy = p2.y - p1.y;
+        var d = Math.sqrt(dx * dx + dy * dy) || 0.001;
+        if (d < R * 2) {
+          var nx = dx / d, ny = dy / d, overlap = R * 2 - d;
+          p1.x -= nx * overlap / 2; p1.y -= ny * overlap / 2;
+          p2.x += nx * overlap / 2; p2.y += ny * overlap / 2;
+          bump(p1, p2, nx, ny);
+          bump(p2, p1, -nx, -ny);
+        }
+      }
+    }
+
+    // stars
+    if (!winner) {
+      for (var s = 0; s < stars.length; s++) {
+        var st = stars[s];
+        for (var j = 0; j < ids.length; j++) {
+          var q = players[ids[j]];
+          if (!q) continue;
+          var ddx = q.x - st.x, ddy = q.y - st.y;
+          if (ddx * ddx + ddy * ddy < (R + STAR_R) * (R + STAR_R)) {
+            q.score++;
+            burst(st.x, st.y, '#ffd166', 16);
+            send(q.id, { t: 'score', score: q.score });
+            send(q.id, { t: 'buzz', ms: 40 });
+            stars[s] = spawnStar();
+            if (q.score >= WIN_SCORE) {
+              winner = { name: q.name, color: q.color, until: t + 5000 };
+              send(q.id, { t: 'buzz', ms: 300 });
+            }
+            break;
+          }
+        }
+      }
+    } else if (t > winner.until) {
+      winner = null;
+      for (var id in players) { players[id].score = 0; send(id, { t: 'score', score: 0 }); }
+    }
+
+    // particles
+    for (var pi = particles.length - 1; pi >= 0; pi--) {
+      var pa = particles[pi];
+      pa.life -= dt;
+      pa.x += pa.vx * dt; pa.y += pa.vy * dt;
+      pa.vx *= 0.92; pa.vy *= 0.92;
+      if (pa.life <= 0) particles.splice(pi, 1);
+    }
+  }
+
+  // Dashing into someone knocks them back, stuns them and steals a point.
+  function bump(attacker, victim, nx, ny) {
+    if (attacker.dashT <= 0 || victim.stun > 0) return;
+    victim.vx = nx * 900; victim.vy = ny * 900;
+    victim.stun = 0.7;
+    attacker.dashT = 0;
+    if (victim.score > 0 && !winner) {
+      victim.score--; attacker.score++;
+      send(victim.id, { t: 'score', score: victim.score });
+      send(attacker.id, { t: 'score', score: attacker.score });
+    }
+    send(victim.id, { t: 'buzz', ms: 120 });
+    burst(victim.x, victim.y, victim.color, 14);
+  }
+
+  function burst(x, y, color, n) {
+    for (var i = 0; i < n; i++) {
+      var ang = Math.random() * Math.PI * 2, sp = 150 + Math.random() * 350;
+      particles.push({ x: x, y: y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, life: 0.6, max: 0.6, color: color, r: 5 + Math.random() * 5 });
+    }
+  }
+
+  // ---------- rendering ----------
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d');
+  var scale = 1, offX = 0, offY = 0;
+
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 1.5); // TVs: keep fill-rate low
+    canvas.width = Math.round(innerWidth * dpr);
+    canvas.height = Math.round(innerHeight * dpr);
+    scale = Math.min(canvas.width / W, canvas.height / H);
+    offX = (canvas.width - W * scale) / 2;
+    offY = (canvas.height - H * scale) / 2;
+  }
+  addEventListener('resize', resize);
+  resize();
+
+  function drawStar(x, y, r, rot) {
+    ctx.beginPath();
+    for (var i = 0; i < 10; i++) {
+      var rr = i % 2 ? r * 0.45 : r;
+      var a = rot + i * Math.PI / 5 - Math.PI / 2;
+      ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function draw() {
+    var t = now();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#0d0b16';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(scale, 0, 0, scale, offX, offY);
+
+    // arena
+    ctx.fillStyle = '#1d1a2e';
+    ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    ctx.lineWidth = 2;
+    for (var gx = 100; gx < W; gx += 100) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke(); }
+    for (var gy = 100; gy < H; gy += 100) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke(); }
+
+    // stars
+    ctx.fillStyle = '#ffd166';
+    for (var s = 0; s < stars.length; s++) {
+      var st = stars[s];
+      var grow = Math.min(1, (t - st.born) / 250);
+      drawStar(st.x, st.y, STAR_R * grow * (1 + Math.sin(t / 200 + s) * 0.08), t / 900 + s);
+    }
+
+    // particles
+    for (var i = 0; i < particles.length; i++) {
+      var pa = particles[i];
+      ctx.globalAlpha = Math.max(0, pa.life / pa.max) * 0.8;
+      ctx.fillStyle = pa.color;
+      ctx.beginPath(); ctx.arc(pa.x, pa.y, pa.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // players
+    var ids = Object.keys(players);
+    ctx.textAlign = 'center';
+    for (var j = 0; j < ids.length; j++) {
+      var p = players[ids[j]];
+      ctx.globalAlpha = p.removeAt ? 0.35 : 1;
+      ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, R, 0, Math.PI * 2); ctx.fill();
+      // dash ready ring
+      if (p.dashCd <= 0) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.arc(p.x, p.y, R + 7, 0, Math.PI * 2); ctx.stroke();
+      }
+      // eyes look where you're heading
+      var ex = p.dx * 10, ey = p.dy * 10;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(p.x - 11 + ex, p.y - 6 + ey, 9, 0, Math.PI * 2); ctx.arc(p.x + 11 + ex, p.y - 6 + ey, 9, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#14121f';
+      var dz = p.stun > 0 ? 0 : 3;
+      ctx.beginPath(); ctx.arc(p.x - 11 + ex + p.dx * dz, p.y - 6 + ey + p.dy * dz, 4.5, 0, Math.PI * 2);
+      ctx.arc(p.x + 11 + ex + p.dx * dz, p.y - 6 + ey + p.dy * dz, 4.5, 0, Math.PI * 2); ctx.fill();
+      // name
+      ctx.font = '700 26px system-ui, sans-serif';
+      ctx.fillStyle = '#f4f1ea';
+      ctx.fillText(p.name, p.x, p.y - R - 14);
+    }
+    ctx.globalAlpha = 1;
+
+    // scoreboard
+    var ranked = ids.map(function (id) { return players[id]; }).sort(function (a, b) { return b.score - a.score; });
+    ctx.textAlign = 'left';
+    for (var k = 0; k < ranked.length && k < 8; k++) {
+      var rp = ranked[k];
+      var y = 50 + k * 44;
+      ctx.fillStyle = rp.color;
+      ctx.beginPath(); ctx.arc(W - 250, y - 9, 12, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#f4f1ea';
+      ctx.font = '600 26px system-ui, sans-serif';
+      ctx.fillText(rp.name, W - 228, y);
+      ctx.textAlign = 'right';
+      ctx.font = '800 28px system-ui, sans-serif';
+      ctx.fillText(String(rp.score), W - 30, y);
+      ctx.textAlign = 'left';
+    }
+
+    // join hint
+    ctx.font = '500 24px system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(244,241,234,0.6)';
+    ctx.fillText('Join: ' + location.host + '/play   code ' + pretty + '   ·   first to ' + WIN_SCORE + ' ★ wins', 30, H - 28);
+
+    // winner banner
+    if (winner) {
+      ctx.fillStyle = 'rgba(13,11,22,0.75)';
+      ctx.fillRect(0, H / 2 - 110, W, 220);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = winner.color;
+      ctx.font = '800 96px system-ui, sans-serif';
+      ctx.fillText(winner.name + ' wins!', W / 2, H / 2 + 20);
+      ctx.fillStyle = '#b9b3c9';
+      ctx.font = '500 30px system-ui, sans-serif';
+      ctx.fillText('Next round in ' + Math.ceil((winner.until - t) / 1000) + '…', W / 2, H / 2 + 75);
+    }
+
+    // lobby overlay visibility
+    var showLobby = ids.length === 0 || t < lobbyForcedUntil;
+    lobbyEl.className = showLobby ? 'lobby' : 'lobby hidden';
+  }
+
+  var last = now();
+  function frame() {
+    var t = now();
+    var dt = Math.min(0.05, (t - last) / 1000);
+    last = t;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // Expose for debugging in the console.
+  window.tvp = { room: room, players: players };
+})();
+</script>
+</body>
+</html>

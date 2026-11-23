@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#14121f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>TV Party · Controller</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: #14121f; color: #f4f1ea; overflow: hidden;
+               font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+               -webkit-user-select: none; user-select: none; touch-action: none; overscroll-behavior: none; }
+  .screen { position: fixed; inset: 0; display: none; }
+  .screen.on { display: flex; }
+
+  /* join form */
+  #join { align-items: center; justify-content: center; padding: 24px; touch-action: auto; }
+  form { width: min(100%, 380px); display: grid; gap: 14px; }
+  h1 { margin: 0 0 6px; font-size: 32px; }
+  label { font-size: 14px; color: #b9b3c9; display: grid; gap: 6px; }
+  input { font: inherit; font-size: 22px; padding: 14px 16px; border-radius: 14px; border: 2px solid #2e2a45;
+          background: #1d1a2e; color: #f4f1ea; outline: none; -webkit-user-select: text; user-select: text; }
+  input:focus { border-color: #06d6a0; }
+  #code { font-size: 34px; letter-spacing: .25em; text-align: center; font-weight: 700; }
+  button { font: inherit; font-size: 20px; font-weight: 700; padding: 16px; border-radius: 14px; border: 0;
+           background: #06d6a0; color: #14121f; }
+  button:disabled { opacity: .5; }
+  .err { color: #ef476f; min-height: 20px; font-size: 15px; }
+
+  /* pad */
+  #pad { flex-direction: row; }
+  @media (orientation: portrait) { #pad { flex-direction: column; } }
+  .zone { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; }
+  .stickzone { border-right: 1px solid #2e2a45; }
+  @media (orientation: portrait) { .stickzone { border-right: 0; border-bottom: 1px solid #2e2a45; } }
+  .hint { position: absolute; bottom: 14px; left: 0; right: 0; text-align: center; color: #6f6888; font-size: 13px; pointer-events: none; }
+  .base { position: absolute; width: 150px; height: 150px; border-radius: 50%; border: 3px solid #2e2a45;
+          background: rgba(255,255,255,.03); transform: translate(-50%, -50%); pointer-events: none; }
+  .knob { position: absolute; width: 70px; height: 70px; border-radius: 50%; background: var(--me, #06d6a0);
+          transform: translate(-50%, -50%); pointer-events: none; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
+  .btn { width: min(46vmin, 220px); height: min(46vmin, 220px); border-radius: 50%; background: var(--me, #06d6a0);
+         color: #14121f; font-weight: 900; font-size: 30px; display: flex; align-items: center; justify-content: center;
+         box-shadow: 0 10px 0 rgba(0,0,0,.35); transition: transform .05s, box-shadow .05s; pointer-events: none; }
+  .btn.down { transform: translateY(8px) scale(.97); box-shadow: 0 2px 0 rgba(0,0,0,.35); }
+  .topbar { position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 14px; padding-top: max(10px, env(safe-area-inset-top)); pointer-events: none; z-index: 2; }
+  .me { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+  .dot { width: 16px; height: 16px; border-radius: 50%; background: var(--me, #06d6a0); }
+  .score { font-weight: 800; font-size: 20px; }
+  .net { font-size: 12px; padding: 3px 8px; border-radius: 99px; background: #2e2a45; color: #b9b3c9; }
+  .net.bad { background: #ef476f; color: #fff; }
+  .leave { pointer-events: auto; background: transparent; color: #6f6888; font-size: 13px; padding: 4px 8px; font-weight: 500; }
+</style>
+</head>
+<body>
+
+<div class="screen on" id="join">
+  <form id="form" autocomplete="off">
+    <h1>Join the TV</h1>
+    <label>Code shown on the TV
+      <input id="code" inputmode="numeric" pattern="[0-9 ]*" maxlength="7" placeholder="123 456" required>
+    </label>
+    <label>Your name
+      <input id="name" maxlength="12" placeholder="Player" required>
+    </label>
+    <button id="go" type="submit">Join</button>
+    <div class="err" id="err"></div>
+  </form>
+</div>
+
+<div class="screen" id="pad">
+  <div class="topbar">
+    <div class="me"><span class="dot"></span><span id="meName"></span></div>
+    <div class="score">★ <span id="score">0</span></div>
+    <div><span class="net" id="net">connecting</span><button class="leave" id="leave">Leave</button></div>
+  </div>
+  <div class="zone stickzone" id="stickZone">
+    <div class="base" id="base"></div>
+    <div class="knob" id="knob"></div>
+    <div class="hint">Touch &amp; drag anywhere here to move</div>
+  </div>
+  <div class="zone" id="btnZone">
+    <div class="btn" id="btn">DASH</div>
+  </div>
+</div>
+
+<script src="/net.js"></script>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+
+  // Persistent player id so a reconnect keeps your score.
+  var pid = store.get('tvp-id');
+  if (!pid) { pid = Math.random().toString(36).slice(2, 12); store.set('tvp-id', pid); }
+
+  var params = new URLSearchParams(location.search);
+  var preRoom = (params.get('room') || '').replace(/\D/g, '').slice(0, 6);
+  if (preRoom) $('code').value = preRoom.slice(0, 3) + ' ' + preRoom.slice(3);
+  $('name').value = store.get('tvp-name') || '';
+  if (!preRoom) $('code').focus(); else if (!$('name').value) $('name').focus();
+
+  $('code').addEventListener('input', function () {
+    var d = this.value.replace(/\D/g, '').slice(0, 6);
+    this.value = d.length > 3 ? d.slice(0, 3) + ' ' + d.slice(3) : d;
+  });
+
+  var sock = null, room = null, name = null, welcomed = false, welcomeTimer = null;
+
+  $('form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    room = $('code').value.replace(/\D/g, '');
+    name = $('name').value.trim() || 'Player';
+    if (room.length !== 6) { $('err').textContent = 'The code has 6 digits.'; return; }
+    store.set('tvp-name', name);
+    $('err').textContent = '';
+    $('go').disabled = true;
+    $('go').textContent = 'Connecting…';
+    welcomed = false;
+    goFullscreen();
+    connect();
+  });
+
+  function connect() {
+    sock = new RoomSocket({ role: 'ctrl', room: room, id: pid }, {
+      open: function () { sendJoin(); setNet(true); },
+      close: function () { setNet(false); },
+      message: onMessage
+    });
+    clearTimeout(welcomeTimer);
+    welcomeTimer = setTimeout(function () {
+      if (welcomed) return;
+      sock.close();
+      sock = null;
+      $('go').disabled = false;
+      $('go').textContent = 'Join';
+      $('err').textContent = 'No TV found with that code. Check the code on the TV screen.';
+    }, 5000);
+  }
+
+  function sendJoin() { if (sock) sock.send({ t: 'join', name: name }); }
+
+  function onMessage(m) {
+    switch (m.t) {
+      case 'welcome':
+        welcomed = true;
+        clearTimeout(welcomeTimer);
+        document.documentElement.style.setProperty('--me', m.color);
+        $('meName').textContent = m.name;
+        $('score').textContent = m.score || 0;
+        show('pad');
+        keepAwake();
+        lastSent = null; // force a fresh input frame
+        break;
+      case 'screen-online':
+      case 'rejoin':
+        sendJoin();
+        break;
+      case 'score':
+        $('score').textContent = m.score;
+        break;
+      case 'buzz':
+        vibrate(Math.min(400, Number(m.ms) || 30));
+        break;
+    }
+  }
+
+  function setNet(ok) {
+    var el = $('net');
+    el.textContent = ok ? 'connected' : 'reconnecting';
+    el.className = ok ? 'net' : 'net bad';
+    if (ok) lastSent = null;
+  }
+
+  function show(id) {
+    $('join').className = id === 'join' ? 'screen on' : 'screen';
+    $('pad').className = id === 'pad' ? 'screen on' : 'screen';
+  }
+
+  $('leave').addEventListener('click', function () {
+    if (sock) sock.close();
+    sock = null;
+    show('join');
+    $('go').disabled = false;
+    $('go').textContent = 'Join';
+  });
+
+  // ---------- input ----------
+  var input = { x: 0, y: 0, a: false };
+  var lastSent = null, lastSentAt = 0;
+  var MAX_R = 60; // px of drag for full speed
+
+  var stick = { id: null, ox: 0, oy: 0 };
+  var zone = $('stickZone'), base = $('base'), knob = $('knob');
+
+  function centerStick() {
+    var r = zone.getBoundingClientRect();
+    var cx = r.width / 2, cy = r.height / 2;
+    base.style.left = knob.style.left = cx + 'px';
+    base.style.top = knob.style.top = cy + 'px';
+  }
+  addEventListener('resize', centerStick);
+  setTimeout(centerStick, 0);
+
+  zone.addEventListener('pointerdown', function (e) {
+    if (stick.id !== null) return;
+    stick.id = e.pointerId;
+    try { zone.setPointerCapture(e.pointerId); } catch (err) {}
+    var r = zone.getBoundingClientRect();
+    stick.ox = e.clientX - r.left; stick.oy = e.clientY - r.top;
+    base.style.left = knob.style.left = stick.ox + 'px';
+    base.style.top = knob.style.top = stick.oy + 'px';
+    e.preventDefault();
+  });
+  zone.addEventListener('pointermove', function (e) {
+    if (e.pointerId !== stick.id) return;
+    var r = zone.getBoundingClientRect();
+    var dx = e.clientX - r.left - stick.ox, dy = e.clientY - r.top - stick.oy;
+    var d = Math.sqrt(dx * dx + dy * dy);
+    if (d > MAX_R) { dx = dx / d * MAX_R; dy = dy / d * MAX_R; }
+    knob.style.left = (stick.ox + dx) + 'px';
+    knob.style.top = (stick.oy + dy) + 'px';
+    var nx = dx / MAX_R, ny = dy / MAX_R;
+    if (Math.sqrt(nx * nx + ny * ny) < 0.12) { nx = 0; ny = 0; } // dead zone
+    input.x = Math.round(nx * 100) / 100;
+    input.y = Math.round(ny * 100) / 100;
+    e.preventDefault();
+  });
+  function endStick(e) {
+    if (e.pointerId !== stick.id) return;
+    stick.id = null;
+    input.x = 0; input.y = 0;
+    centerStick();
+    flush(true);
+  }
+  zone.addEventListener('pointerup', endStick);
+  zone.addEventListener('pointercancel', endStick);
+
+  var btnZone = $('btnZone'), btn = $('btn'), btnPointers = {};
+  function btnCount() { return Object.keys(btnPointers).length; }
+  btnZone.addEventListener('pointerdown', function (e) {
+    btnPointers[e.pointerId] = true;
+    try { btnZone.setPointerCapture(e.pointerId); } catch (err) {}
+    input.a = true; btn.className = 'btn down';
+    vibrate(10);
+    flush(true);
+    e.preventDefault();
+  });
+  function endBtn(e) {
+    delete btnPointers[e.pointerId];
+    if (btnCount() === 0) { input.a = false; btn.className = 'btn'; flush(true); }
+  }
+  btnZone.addEventListener('pointerup', endBtn);
+  btnZone.addEventListener('pointercancel', endBtn);
+
+  // Keyboard for testing on a laptop: arrows/WASD + space.
+  var keys = {};
+  addEventListener('keydown', function (e) { keys[e.key.toLowerCase()] = true; keyInput(); });
+  addEventListener('keyup', function (e) { keys[e.key.toLowerCase()] = false; keyInput(); });
+  function keyInput() {
+    if (stick.id !== null || $('pad').className.indexOf('on') < 0) return;
+    input.x = (keys.arrowright || keys.d ? 1 : 0) - (keys.arrowleft || keys.a ? 1 : 0);
+    input.y = (keys.arrowdown || keys.s ? 1 : 0) - (keys.arrowup || keys.w ? 1 : 0);
+    input.a = !!keys[' '];
+    flush(true);
+  }
+
+  // Send only when the input changed, at most ~30 times a second,
+  // plus a keepalive every second so the TV knows we're still here.
+  function flush(force) {
+    if (!sock || !welcomed) return;
+    var t = Date.now();
+    var changed = !lastSent || lastSent.x !== input.x || lastSent.y !== input.y || lastSent.a !== input.a;
+    if (!changed && t - lastSentAt < 1000) return;
+    if (!force && changed && t - lastSentAt < 33) return;
+    if (sock.send({ t: 'in', x: input.x, y: input.y, a: input.a })) {
+      lastSent = { x: input.x, y: input.y, a: input.a };
+      lastSentAt = t;
+    }
+  }
+  setInterval(function () { flush(false); }, 16);
+
+  // ---------- phone niceties ----------
+  function vibrate(ms) { try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) {} }
+
+  var wakeLock = null;
+  function keepAwake() {
+    try {
+      if (navigator.wakeLock && !wakeLock) {
+        navigator.wakeLock.request('screen').then(function (l) {
+          wakeLock = l;
+          l.addEventListener('release', function () { wakeLock = null; });
+        }).catch(function () {});
+      }
+    } catch (e) {}
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && welcomed) keepAwake();
+  });
+
+  function goFullscreen() {
+    var el = document.documentElement;
+    try {
+      var p = (el.requestFullscreen || el.webkitRequestFullscreen || function () {}).call(el);
+      if (p && p.catch) p.catch(function () {});
+    } catch (e) {}
+  }
+})();
+</script>
+</body>
+</html>

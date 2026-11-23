@@ -1,0 +1,19 @@
+{
+  "name": "tv-party",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AirConsole-style party games: the TV browser is the console, phones are the controllers. Runs on Vercel.",
+  "type": "module",
+  "scripts": {
+    "dev": "node dev.js",
+    "test": "node test/relay.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ioredis": "^5.4.1",
+    "qrcode": "^1.5.4",
+    "ws": "^8.18.0"
+  }
+}
