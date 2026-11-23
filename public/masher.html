@@ -1,0 +1,991 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TV Party · Monster Masher</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #14121f; color: #f4f1ea;
+               font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; cursor: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  .lobby { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+           background: rgba(20, 18, 31, .88); transition: opacity .4s; }
+  .lobby.hidden { opacity: 0; pointer-events: none; }
+  .card { display: flex; gap: 5vw; align-items: center; }
+  .qr { width: 30vh; height: 30vh; background: #fff; border-radius: 16px; padding: 1.5vh; }
+  .qr img { width: 100%; height: 100%; display: block; }
+  .how { font-size: 3.2vh; line-height: 1.4; color: #b9b3c9; }
+  .how b { color: #f4f1ea; }
+  .title { font-size: 7vh; font-weight: 900; color: #f4f1ea; line-height: 1.1; margin-bottom: 1.5vh; }
+  .title span { color: #b388ff; }
+  .code { font-size: 14vh; font-weight: 800; letter-spacing: .06em; color: #ffd166; line-height: 1.05; margin: 1vh 0 2vh; }
+  .players { margin-top: 1vh; font-size: 2.8vh; min-height: 4vh; }
+  .chip { display: inline-block; padding: .4vh 1.4vh; border-radius: 99px; margin: .4vh .6vh 0 0; color: #14121f; font-weight: 700; }
+  .countdown { margin-top: 2vh; font-size: 3.6vh; font-weight: 800; color: #06d6a0; min-height: 5vh; }
+  .status { position: fixed; top: 2vh; left: 50%; transform: translateX(-50%); padding: .8vh 2vh;
+            border-radius: 99px; background: #ef476f; color: #fff; font-size: 2.4vh; display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="lobby" id="lobby">
+  <div class="card">
+    <div class="qr"><img id="qr" alt=""></div>
+    <div class="how">
+      <div class="title">Monster <span>Masher</span></div>
+      Scan QR pakai HP, atau buka<br>
+      <b id="joinUrl"></b><br>lalu masukkan kode:
+      <div class="code" id="code">------</div>
+      <div class="players" id="lobbyPlayers">Menunggu pemain…</div>
+      <div class="countdown" id="countdown"></div>
+    </div>
+  </div>
+</div>
+<div class="status" id="status">Menyambung ulang…</div>
+
+<script src="/net.js"></script>
+<script>
+// Monster Masher: a kids' party game. Every round is either a kart race (BALAPAN)
+// or a team fight against a giant monster (LAWAN MONSTER). A round is a chain of
+// short challenges the phones act out:
+//   tap    - mash the big coloured button          (karts drive / heroes punch)
+//   shake  - shake the phone, or rub the screen    (rocket boost / power punch)
+//   shield - pick the shield matching the TV       (boost, or block the monster)
+// The TV decides everything; phones only show what they are told (see play.html).
+(function () {
+  // ---------- room (same key as tv.html, so switching games in one tab keeps the room) ----------
+  var room = null;
+  try { room = sessionStorage.getItem('tvp-room'); } catch (e) {}
+  if (!room || !/^\d{6}$/.test(room)) {
+    room = String(100000 + Math.floor(Math.random() * 900000));
+    try { sessionStorage.setItem('tvp-room', room); } catch (e) {}
+  }
+  var pretty = room.slice(0, 3) + ' ' + room.slice(3);
+  document.getElementById('code').textContent = pretty;
+  document.getElementById('joinUrl').textContent = location.host + '/play';
+  document.getElementById('qr').src = '/api/qr?room=' + room;
+
+  // ---------- tuning ----------
+  var W = 1600, H = 900;
+  var TRACK = 100;                                    // race length
+  var RACE_TAP = 0.55, RACE_SHAKE = 0.38;             // progress per tap / per shake tick (p = 1)
+  var RACE_SHIELD_FIRST = 14, RACE_SHIELD = 10, RACE_WRONG = 4;
+  var BOSS_HP_PER_PLAYER = 110;
+  var BOSS_TAP = 1, BOSS_SHAKE = 1.3, BOSS_SHIELD = 8, BOSS_HEAL = 5;
+  var MAX_ACTS_PER_SEC = 14;                          // per player, ignores turbo-mashing beyond this
+  var TITLE_MS = 2600, INTRO_MS = 1600, GAP_MS = 1300, BANNER_MS = 6500, LOBBY_MS = 6000;
+  var BOSS_TIME_MS = 75000, DIZZY_MS = 2500;
+  var TASK_MS = { tap: 6000, shake: 6000, shield: 4500 };
+
+  // Task colours each carry a shape too, so colour-blind kids can match shields.
+  var TASK_COLORS = [
+    { id: 'red', name: 'MERAH', hex: '#ef476f', shape: 'circle' },
+    { id: 'blue', name: 'BIRU', hex: '#4cc9f0', shape: 'square' },
+    { id: 'green', name: 'HIJAU', hex: '#06d6a0', shape: 'triangle' },
+    { id: 'yellow', name: 'KUNING', hex: '#ffd166', shape: 'star' }
+  ];
+  // Player colours stay away from the task colours so they are never confused.
+  var PLAYER_COLORS = ['#ff9f1c', '#f72585', '#90be6d', '#b388ff', '#8ecae6', '#2ec4b6', '#fb8500', '#c77dff', '#a8dadc', '#ffafcc'];
+
+  var RACE_X0 = 190, RACE_X1 = 1440, FINISH_X = 1400; // at 100% the kart's nose is past the finish line
+  var MONSTER_X = 1170, MONSTER_Y = 570;
+
+  // ---------- state ----------
+  var players = {};   // id -> player
+  var order = [];     // join order (lanes / slots)
+  var state = 'lobby', stateAt = 0, stateUntil = 0; // lobby | title | intro | active | gap | banner
+  var mode = 'race', nextMode = 'race';
+  var task = null, lastKind = null;
+  var lobbyStartAt = 0;
+  var boss = { hp: 1, max: 1, hitAt: -1e9, wob: 0, endAt: 0, defeated: false, laugh: false };
+  var banner = null;
+  var particles = [], shots = [], floaters = [], toasts = [];
+
+  function now() { return performance.now(); }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function num(v) { v = Number(v); return isFinite(v) ? v : 0; }
+  function shuffle(a) {
+    a = a.slice();
+    for (var i = a.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var x = a[i]; a[i] = a[j]; a[j] = x; }
+    return a;
+  }
+  function colorById(id) {
+    for (var i = 0; i < TASK_COLORS.length; i++) if (TASK_COLORS[i].id === id) return TASK_COLORS[i];
+    return TASK_COLORS[0];
+  }
+  function list() {
+    var out = [];
+    for (var i = 0; i < order.length; i++) if (players[order[i]]) out.push(players[order[i]]);
+    return out;
+  }
+  function setState(s, ms) { state = s; stateAt = now(); stateUntil = stateAt + (ms || 0); }
+
+  function freeColor() {
+    var used = {};
+    for (var id in players) used[players[id].color] = true;
+    for (var i = 0; i < PLAYER_COLORS.length; i++) if (!used[PLAYER_COLORS[i]]) return PLAYER_COLORS[i];
+    return PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
+  }
+
+  function newPlayer(id, name) {
+    return {
+      id: id, name: name, color: freeColor(), stars: 0,
+      progress: 0, shown: 0, dmg: 0,
+      dizzyUntil: 0, spinUntil: 0, boostUntil: 0, shieldUntil: 0, shieldColor: null,
+      fireAt: 0, bounce: 0, actWin: 0, actN: 0, picked: null,
+      removeAt: 0, cid: null, endIcon: null
+    };
+  }
+
+  // ---------- networking ----------
+  var sock = new RoomSocket({ role: 'screen', room: room }, {
+    open: function () {
+      setStatus(true);
+      sock.send({ t: 'screen-online' }); // phones re-join after the TV reconnects
+    },
+    close: function () { setStatus(false); },
+    message: onMessage
+  });
+
+  function setStatus(ok) { document.getElementById('status').style.display = ok ? 'none' : 'block'; }
+  function send(to, msg) { msg.to = to; sock.send(msg); }
+  function broadcast(msg) { sock.send(msg); }
+
+  function taskMsg(delay, ms) {
+    return { t: 'task', kind: task.kind, color: task.color, options: task.options, delay: Math.round(delay), ms: Math.round(ms) };
+  }
+
+  // What a phone that (re)joins right now should be showing.
+  function phoneTask(p) {
+    var t = now();
+    if (task && (state === 'intro' || state === 'active') && !(task.kind === 'shield' && p.picked)) {
+      return state === 'intro'
+        ? taskMsg(Math.max(0, stateUntil - t), TASK_MS[task.kind])
+        : taskMsg(0, Math.max(0, stateUntil - t));
+    }
+    if (state === 'banner' && p.endIcon) return { t: 'task', kind: 'wait', icon: p.endIcon };
+    return { t: 'task', kind: 'wait', icon: 'tv' };
+  }
+
+  function onMessage(m) {
+    var t = now();
+    var p = m.from ? players[m.from] : null;
+    switch (m.t) {
+      case 'join': {
+        var name = String(m.name || 'Player').replace(/\s+/g, ' ').trim().slice(0, 12) || 'Player';
+        if (!p) {
+          p = players[m.from] = newPlayer(m.from, name);
+          if (order.indexOf(m.from) < 0) order.push(m.from);
+          // Late joiners in a race start next to the last kart, not miles behind.
+          if (mode === 'race' && state !== 'lobby' && state !== 'banner') p.progress = p.shown = lowestProgress(p);
+          toast(name + ' ikut main!', p.color);
+        }
+        p.name = name;
+        p.cid = m.cid;
+        p.removeAt = 0;
+        send(m.from, { t: 'welcome', game: 'masher', color: p.color, name: p.name, score: p.stars });
+        send(m.from, phoneTask(p));
+        renderLobby();
+        break;
+      }
+      case 'in':  // keepalive from the controller
+      case 'act': {
+        if (!p) { send(m.from, { t: 'rejoin' }); return; }
+        p.cid = m.cid;
+        p.removeAt = 0;
+        if (m.t === 'act') onAct(p, m, t);
+        break;
+      }
+      case 'leave': {
+        // Ignore a 'leave' from an old connection if the phone already reconnected.
+        if (p && p.cid === m.cid) p.removeAt = t + 8000;
+        break;
+      }
+    }
+  }
+
+  function lowestProgress(except) {
+    var low = null, ps = list();
+    for (var i = 0; i < ps.length; i++) if (ps[i] !== except && (low === null || ps[i].progress < low)) low = ps[i].progress;
+    return low || 0;
+  }
+
+  // ---------- actions from phones ----------
+  function onAct(p, m, t) {
+    if (state !== 'active' || !task) return;
+    if (t - p.actWin > 1000) { p.actWin = t; p.actN = 0; }
+    if (++p.actN > MAX_ACTS_PER_SEC) return;
+    var slow = t < p.dizzyUntil ? 0.5 : 1;
+
+    if (m.k === 'tap' && task.kind === 'tap') {
+      power(p, RACE_TAP * slow, BOSS_TAP * slow, t);
+    } else if (m.k === 'shake' && task.kind === 'shake') {
+      var pw = clamp(num(m.p), 0, 1);
+      if (pw > 0) power(p, RACE_SHAKE * pw * slow, BOSS_SHAKE * pw * slow, t);
+    } else if (m.k === 'pick' && task.kind === 'shield' && !p.picked) {
+      var c = String(m.c || '');
+      if (!task.options || task.options.indexOf(c) < 0) return;
+      p.picked = c;
+      var ok = c === task.color;
+      send(p.id, { t: 'res', ok: ok });
+      if (ok) {
+        p.shieldUntil = t + 1600;
+        p.shieldColor = colorById(c).hex;
+        if (mode === 'race') {
+          var gain = task.firstOk ? RACE_SHIELD : RACE_SHIELD_FIRST;
+          var pos = racePos(p);
+          floater(pos.x, pos.y - 70, '+' + gain, '#ffd166');
+          addProgress(p, gain, t);
+        } else {
+          hitBoss(p, BOSS_SHIELD, t, true);
+        }
+        task.firstOk = true;
+      } else {
+        send(p.id, { t: 'buzz', ms: 150 });
+        if (mode === 'race') { p.spinUntil = t + 1000; p.progress = Math.max(0, p.progress - RACE_WRONG); }
+      }
+    }
+  }
+
+  function power(p, raceGain, bossDmg, t) {
+    if (t < p.spinUntil) return;
+    if (mode === 'race') addProgress(p, raceGain, t);
+    else hitBoss(p, bossDmg, t, false);
+  }
+
+  function addProgress(p, d, t) {
+    if (state === 'banner') return;
+    p.progress = Math.min(TRACK, p.progress + d);
+    p.boostUntil = t + 300;
+    if (p.progress >= TRACK) raceWin(p, t);
+  }
+
+  function hitBoss(p, d, t, big) {
+    if (boss.hp <= 0) return;
+    boss.hp = Math.max(0, boss.hp - d);
+    p.dmg += d;
+    p.bounce = 1;
+    if (big || t >= p.fireAt) {           // throttle the visuals, not the damage
+      p.fireAt = t + 110;
+      var s = bossSlotOf(p);
+      var tx = MONSTER_X - 110 + Math.random() * 60, ty = MONSTER_Y - 60 + Math.random() * 120;
+      shoot(s.x + 55 * s.s, s.y - 10 * s.s, tx, ty, p.color, big ? 'big' : 'star', 380, function () {
+        boss.hitAt = now(); boss.wob = 1;
+        burst(tx, ty, p.color, big ? 18 : 5);
+      });
+      if (big) floater(MONSTER_X - 40, MONSTER_Y - 230, '-' + d, '#fff');
+    }
+  }
+
+  // ---------- round flow ----------
+  function startRound() {
+    var t = now(), ps = list();
+    mode = nextMode;
+    nextMode = mode === 'race' ? 'boss' : 'race';
+    lobbyStartAt = 0;
+    banner = null;
+    for (var i = 0; i < ps.length; i++) {
+      var p = ps[i];
+      p.progress = p.shown = p.dmg = 0;
+      p.dizzyUntil = p.spinUntil = p.boostUntil = p.shieldUntil = 0;
+      p.picked = null; p.endIcon = null;
+    }
+    if (mode === 'boss') {
+      boss.max = boss.hp = BOSS_HP_PER_PLAYER * Math.max(1, ps.length);
+      boss.defeated = boss.laugh = false;
+      boss.endAt = t + TITLE_MS + BOSS_TIME_MS;
+    }
+    task = null; lastKind = null;
+    setState('title', TITLE_MS);
+    broadcast({ t: 'task', kind: 'wait', icon: 'tv' });
+  }
+
+  function nextTask() {
+    var kinds = ['tap', 'shake', 'shield'].filter(function (k) { return k !== lastKind; });
+    var kind = kinds[Math.floor(Math.random() * kinds.length)];
+    lastKind = kind;
+    var c = TASK_COLORS[Math.floor(Math.random() * TASK_COLORS.length)];
+    task = {
+      kind: kind, color: c.id, firstOk: false, early: false,
+      options: kind === 'shield' ? shuffle(TASK_COLORS.map(function (x) { return x.id; })) : null
+    };
+    var ps = list();
+    for (var i = 0; i < ps.length; i++) ps[i].picked = null;
+    setState('intro', INTRO_MS);
+    broadcast(taskMsg(INTRO_MS, TASK_MS[kind]));
+  }
+
+  function endTask() {
+    var t = now();
+    if (task.kind === 'shield' && mode === 'boss') {
+      // The monster attacks: everyone without the right shield gets dizzy.
+      var c = colorById(task.color), ps = list();
+      for (var i = 0; i < ps.length; i++) {
+        var q = ps[i];
+        if (q.picked === task.color) { q.shieldUntil = t + 1400; q.shieldColor = c.hex; continue; }
+        boss.hp = Math.min(boss.max, boss.hp + BOSS_HEAL);
+        send(q.id, { t: 'buzz', ms: 250 });
+        (function (q) {
+          var s = bossSlotOf(q);
+          shoot(MONSTER_X - 130, MONSTER_Y + 60, s.x, s.y, c.hex, 'fire', 520, function () {
+            q.dizzyUntil = now() + DIZZY_MS;
+            burst(s.x, s.y, c.hex, 12);
+          });
+        })(q);
+      }
+    }
+    setState('gap', GAP_MS);
+    broadcast({ t: 'task', kind: 'wait', icon: 'tv' });
+  }
+
+  function raceWin(w, t) {
+    var ps = list().sort(function (a, b) { return a === w ? -1 : b === w ? 1 : b.progress - a.progress; });
+    var awards = [3, 2, 1], podium = [];
+    for (var i = 0; i < ps.length; i++) {
+      var q = ps[i], add = awards[i] || 0;
+      q.stars += add;
+      if (i < 3) podium.push({ name: q.name, color: q.color, add: add });
+      q.endIcon = q === w ? 'trophy' : 'clap';
+      send(q.id, { t: 'score', score: q.stars });
+      send(q.id, { t: 'task', kind: 'wait', icon: q.endIcon });
+    }
+    send(w.id, { t: 'buzz', ms: 300 });
+    banner = { kind: 'race', title: w.name + ' JUARA!', sub: 'Hebat semuanya!', color: w.color, podium: podium, at: t };
+    task = null;
+    setState('banner', BANNER_MS);
+    confetti();
+  }
+
+  function bossWin(t) {
+    var ps = list(), mvp = ps[0];
+    for (var i = 1; i < ps.length; i++) if (ps[i].dmg > mvp.dmg) mvp = ps[i];
+    var team = ps.length > 1;
+    for (var j = 0; j < ps.length; j++) {
+      var q = ps[j], best = team && q === mvp;
+      q.stars += best ? 3 : 2;
+      q.endIcon = best ? 'trophy' : 'party';
+      send(q.id, { t: 'score', score: q.stars });
+      send(q.id, { t: 'task', kind: 'wait', icon: q.endIcon });
+      send(q.id, { t: 'buzz', ms: 300 });
+    }
+    boss.defeated = true;
+    banner = { kind: 'bosswin', title: 'MONSTER KALAH!', sub: team ? 'Pemukul terhebat: ' + mvp.name : 'Hebat sekali!', color: '#ffd166', at: t };
+    task = null;
+    setState('banner', BANNER_MS);
+    confetti();
+  }
+
+  function bossLose(t) {
+    var ps = list();
+    for (var i = 0; i < ps.length; i++) {
+      ps[i].endIcon = 'again';
+      send(ps[i].id, { t: 'task', kind: 'wait', icon: 'again' });
+    }
+    boss.laugh = true;
+    banner = { kind: 'bosslose', title: 'Monster kabur!', sub: 'Ayo coba lagi!', color: '#c77dff', at: t };
+    task = null;
+    setState('banner', BANNER_MS);
+  }
+
+  function toLobby() {
+    task = null; banner = null; lobbyStartAt = 0;
+    setState('lobby');
+    broadcast({ t: 'task', kind: 'wait', icon: 'tv' });
+    renderLobby();
+  }
+
+  // TV remote / keyboard: OK or Space starts right away from the lobby.
+  addEventListener('keydown', function (e) {
+    if ((e.key === 'Enter' || e.key === ' ') && state === 'lobby' && list().length) startRound();
+  });
+
+  // ---------- lobby ----------
+  var lobbyEl = document.getElementById('lobby');
+  var lobbyPlayersEl = document.getElementById('lobbyPlayers');
+  var countdownEl = document.getElementById('countdown');
+  var countdownText = '';
+
+  function renderLobby() {
+    var ps = list();
+    lobbyPlayersEl.textContent = '';
+    if (!ps.length) { lobbyPlayersEl.textContent = 'Menunggu pemain…'; return; }
+    ps.forEach(function (p) {
+      var s = document.createElement('span');
+      s.className = 'chip';
+      s.style.background = p.color;
+      s.textContent = p.name + (p.stars ? ' ★' + p.stars : '');
+      lobbyPlayersEl.appendChild(s);
+    });
+  }
+
+  // ---------- simulation ----------
+  function update(dt) {
+    var t = now();
+    var removed = false;
+    for (var id in players) {
+      if (players[id].removeAt && t > players[id].removeAt) {
+        delete players[id];
+        order.splice(order.indexOf(id), 1);
+        removed = true;
+      }
+    }
+    if (removed) renderLobby();
+    var ps = list();
+    if (!ps.length && state !== 'lobby') toLobby();
+
+    for (var i = 0; i < ps.length; i++) {
+      var p = ps[i];
+      p.shown += (p.progress - p.shown) * Math.min(1, dt * 6);
+      p.bounce = Math.max(0, p.bounce - dt * 5);
+      if (mode === 'race' && t < p.boostUntil && Math.random() < 0.5) {
+        var rp = racePos(p);
+        particles.push({ x: rp.x - 60 * rp.s, y: rp.y + 20 * rp.s, vx: -120 - Math.random() * 80, vy: -20 - Math.random() * 30,
+                         life: 0.5, max: 0.5, color: 'rgba(255,255,255,0.6)', r: 6 + Math.random() * 6, g: 0 });
+      }
+    }
+    boss.wob = Math.max(0, boss.wob - dt * 3);
+
+    switch (state) {
+      case 'lobby':
+        if (ps.length) {
+          if (!lobbyStartAt) lobbyStartAt = t + LOBBY_MS;
+          if (t >= lobbyStartAt) startRound();
+        } else lobbyStartAt = 0;
+        break;
+      case 'title':
+        if (t >= stateUntil) nextTask();
+        break;
+      case 'intro':
+        if (t >= stateUntil) setState('active', TASK_MS[task.kind]);
+        break;
+      case 'active':
+        if (task.kind === 'shield' && !task.early && allPicked(ps)) { task.early = true; stateUntil = Math.min(stateUntil, t + 600); }
+        if (t >= stateUntil) endTask();
+        break;
+      case 'gap':
+        if (t >= stateUntil) nextTask();
+        break;
+      case 'banner':
+        if (t >= stateUntil) { if (ps.length) startRound(); else toLobby(); }
+        break;
+    }
+    if (mode === 'boss' && (state === 'title' || state === 'intro' || state === 'active' || state === 'gap')) {
+      if (boss.hp <= 0) bossWin(t);
+      else if (t >= boss.endAt) bossLose(t);
+    }
+
+    // effects
+    for (var s = shots.length - 1; s >= 0; s--) {
+      if (t >= shots[s].t0 + shots[s].dur) { var sh = shots.splice(s, 1)[0]; if (sh.onHit) sh.onHit(); }
+    }
+    for (var k = particles.length - 1; k >= 0; k--) {
+      var pa = particles[k];
+      pa.life -= dt;
+      pa.vy += (pa.g || 0) * dt;
+      pa.x += pa.vx * dt; pa.y += pa.vy * dt;
+      if (!pa.g) { pa.vx *= 0.92; pa.vy *= 0.92; }
+      if (pa.life <= 0) particles.splice(k, 1);
+    }
+    for (var f = floaters.length - 1; f >= 0; f--) if (t > floaters[f].until) floaters.splice(f, 1);
+    for (var q = toasts.length - 1; q >= 0; q--) if (t > toasts[q].until) toasts.splice(q, 1);
+  }
+
+  function allPicked(ps) {
+    if (!ps.length) return false;
+    for (var i = 0; i < ps.length; i++) if (!ps[i].picked) return false;
+    return true;
+  }
+
+  // ---------- effects ----------
+  function shoot(x0, y0, x1, y1, color, kind, dur, onHit) {
+    shots.push({ x0: x0, y0: y0, x1: x1, y1: y1, color: color, kind: kind, t0: now(), dur: dur, onHit: onHit });
+  }
+  function burst(x, y, color, n) {
+    for (var i = 0; i < n; i++) {
+      var ang = Math.random() * Math.PI * 2, sp = 150 + Math.random() * 350;
+      particles.push({ x: x, y: y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, life: 0.6, max: 0.6, color: color, r: 5 + Math.random() * 5, g: 0 });
+    }
+  }
+  function confetti() {
+    var cols = ['#ef476f', '#4cc9f0', '#06d6a0', '#ffd166', '#b388ff', '#ff9f1c'];
+    for (var i = 0; i < 140; i++) {
+      particles.push({ x: Math.random() * W, y: -20 - Math.random() * 200, vx: (Math.random() - 0.5) * 160, vy: 100 + Math.random() * 200,
+                       life: 3.5, max: 3.5, color: cols[i % cols.length], r: 6 + Math.random() * 6, g: 160, sq: true });
+    }
+  }
+  function floater(x, y, text, color) { floaters.push({ x: x, y: y, text: text, color: color, at: now(), until: now() + 1000 }); }
+  function toast(text, color) { toasts.push({ text: text, color: color, until: now() + 2600 }); }
+
+  // ---------- layout ----------
+  function raceLanes(n) {
+    var top = 250, avail = H - 70 - top;
+    var laneH = Math.min(140, avail / Math.max(1, n));
+    return { top: top + (avail - laneH * n) / 2, h: laneH };
+  }
+  function racePos(p) {
+    var ps = list(), i = ps.indexOf(p), L = raceLanes(ps.length);
+    var s = clamp(L.h / 140, 0.4, 1);   // kart + name label is ~130 px tall at s = 1
+    return { x: RACE_X0 + (p.shown / TRACK) * (RACE_X1 - RACE_X0), y: L.top + L.h * (i + 0.5) + 22 * s, s: s };
+  }
+  function bossSlot(i, n) {
+    var cols = n > 5 ? 2 : 1, rows = Math.ceil(n / cols);
+    var top = 300, avail = H - 80 - top;
+    var rowH = Math.min(130, avail / rows);
+    var r = i % rows, c = Math.floor(i / rows);
+    return { x: 200 + c * 250, y: top + (avail - rowH * rows) / 2 + rowH * (r + 0.5), s: clamp(rowH / 130, 0.5, 1) };
+  }
+  function bossSlotOf(p) { var ps = list(); return bossSlot(Math.max(0, ps.indexOf(p)), ps.length); }
+
+  // ---------- rendering ----------
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d');
+  var scale = 1, offX = 0, offY = 0;
+
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 1.5); // TVs: keep fill-rate low
+    canvas.width = Math.round(innerWidth * dpr);
+    canvas.height = Math.round(innerHeight * dpr);
+    scale = Math.min(canvas.width / W, canvas.height / H);
+    offX = (canvas.width - W * scale) / 2;
+    offY = (canvas.height - H * scale) / 2;
+  }
+  addEventListener('resize', resize);
+  resize();
+
+  var sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#1b1340'); sky.addColorStop(0.6, '#2a1d5c'); sky.addColorStop(1, '#3a2a6e');
+
+  function rr(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+  function circle(x, y, r) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); }
+  function ellipse(x, y, rx, ry) {
+    ctx.save(); ctx.translate(x, y); ctx.scale(rx, ry);
+    ctx.beginPath(); ctx.arc(0, 0, 1, 0, Math.PI * 2);
+    ctx.restore();
+  }
+  function starPath(x, y, r, rot) {
+    ctx.beginPath();
+    for (var i = 0; i < 10; i++) {
+      var rr2 = i % 2 ? r * 0.45 : r;
+      var a = rot + i * Math.PI / 5 - Math.PI / 2;
+      ctx.lineTo(x + Math.cos(a) * rr2, y + Math.sin(a) * rr2);
+    }
+    ctx.closePath();
+  }
+  function symbol(shape, x, y, r) {
+    ctx.fillStyle = '#fff';
+    if (shape === 'circle') circle(x, y, r);
+    else if (shape === 'square') rr(x - r * 0.9, y - r * 0.9, r * 1.8, r * 1.8, r * 0.25);
+    else if (shape === 'triangle') { ctx.beginPath(); ctx.moveTo(x, y - r); ctx.lineTo(x + r * 1.05, y + r * 0.8); ctx.lineTo(x - r * 1.05, y + r * 0.8); ctx.closePath(); }
+    else starPath(x, y, r * 1.2, 0);
+    ctx.fill();
+  }
+  function shieldPath(cx, cy, s) {
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - s);
+    ctx.quadraticCurveTo(cx + s * 0.5, cy - s * 0.72, cx + s * 0.86, cy - s * 0.8);
+    ctx.quadraticCurveTo(cx + s * 0.92, cy + s * 0.25, cx, cy + s);
+    ctx.quadraticCurveTo(cx - s * 0.92, cy + s * 0.25, cx - s * 0.86, cy - s * 0.8);
+    ctx.quadraticCurveTo(cx - s * 0.5, cy - s * 0.72, cx, cy - s);
+    ctx.closePath();
+  }
+  function text(str, x, y, size, color, align, weight) {
+    ctx.font = (weight || 800) + ' ' + size + 'px system-ui, sans-serif';
+    ctx.textAlign = align || 'center';
+    ctx.fillStyle = color;
+    ctx.fillText(str, x, y);
+  }
+
+  function drawKart(p, x, y, s, t) {
+    var spinning = t < p.spinUntil, boosting = t < p.boostUntil;
+    ctx.save();
+    ctx.translate(x, y - p.bounce * 10 * s);
+    ctx.scale(s, s);
+    // shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.28)'; ellipse(0, 38, 62, 9); ctx.fill();
+    if (spinning) ctx.rotate((p.spinUntil - t) / 1000 * Math.PI * 4);
+    ctx.translate(0, Math.sin(t / 70 + x) * (boosting ? 2 : 0.6));
+    // rocket flame
+    if (boosting) {
+      var fl = 28 + Math.random() * 22;
+      ctx.fillStyle = '#ff9f1c';
+      ctx.beginPath(); ctx.moveTo(-56, -8); ctx.lineTo(-56 - fl, 4); ctx.lineTo(-56, 16); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#ffd166';
+      ctx.beginPath(); ctx.moveTo(-56, -2); ctx.lineTo(-56 - fl * 0.55, 4); ctx.lineTo(-56, 10); ctx.closePath(); ctx.fill();
+    }
+    // body
+    ctx.fillStyle = p.color; rr(-56, -14, 112, 38, 15); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.35)'; rr(12, -8, 34, 10, 5); ctx.fill();
+    // driver
+    ctx.fillStyle = '#ffe3c4'; circle(-10, -30, 19); ctx.fill();
+    ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(-10, -32, 21, Math.PI, 0); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.5)'; rr(-24, -40, 28, 6, 3); ctx.fill();
+    ctx.fillStyle = '#14121f'; circle(-4, -26, 3.5); ctx.fill(); circle(6, -26, 3.5); ctx.fill();
+    // wheels
+    ctx.fillStyle = '#1b1830'; circle(-34, 24, 14); ctx.fill(); circle(34, 24, 14); ctx.fill();
+    ctx.fillStyle = '#9a96ad'; circle(-34, 24, 5); ctx.fill(); circle(34, 24, 5); ctx.fill();
+    ctx.restore();
+
+    // shield bubble
+    if (t < p.shieldUntil && p.shieldColor) {
+      ctx.globalAlpha = clamp((p.shieldUntil - t) / 400, 0, 1) * 0.9;
+      ctx.strokeStyle = p.shieldColor; ctx.lineWidth = 7 * s;
+      circle(x, y - 6 * s, 78 * s); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    // dizzy stars
+    if (t < p.dizzyUntil) {
+      ctx.fillStyle = '#ffd166';
+      for (var i = 0; i < 3; i++) {
+        var a = t / 220 + i * Math.PI * 2 / 3;
+        starPath(x - 10 * s + Math.cos(a) * 30 * s, y - 62 * s + Math.sin(a) * 9 * s, 9 * s, a);
+        ctx.fill();
+      }
+    }
+    // name
+    text(p.name + (p.stars ? '  ★' + p.stars : ''), x, y - 66 * s - (t < p.dizzyUntil ? 14 * s : 0), Math.round(24 * Math.max(s, 0.7)), '#f4f1ea', 'center', 700);
+  }
+
+  function drawRace(t) {
+    var ps = list();
+    var n = Math.max(1, ps.length), L = raceLanes(n);
+    var trackTop = L.top - 10, trackH = L.h * n + 20;
+    ctx.fillStyle = '#262040'; rr(60, trackTop, W - 120, trackH, 20); ctx.fill();
+    // lane lines
+    ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.lineWidth = 3;
+    if (ctx.setLineDash) ctx.setLineDash([26, 22]);
+    for (var i = 1; i < n; i++) {
+      var ly = L.top + L.h * i;
+      ctx.beginPath(); ctx.moveTo(80, ly); ctx.lineTo(W - 80, ly); ctx.stroke();
+    }
+    if (ctx.setLineDash) ctx.setLineDash([]);
+    // start line
+    ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillRect(RACE_X0 - 80, trackTop, 6, trackH);
+    // checkered finish
+    var sq = 18;
+    for (var yy = 0; yy * sq < trackH; yy++) {
+      for (var xx = 0; xx < 3; xx++) {
+        ctx.fillStyle = (xx + yy) % 2 ? '#14121f' : '#f4f1ea';
+        ctx.fillRect(FINISH_X + xx * sq, trackTop + yy * sq, sq, Math.min(sq, trackH - yy * sq));
+      }
+    }
+    // trophy flag beyond the finish
+    ctx.fillStyle = '#ffd166'; starPath(FINISH_X + 120, trackTop + trackH / 2, 34, t / 1500); ctx.fill();
+    for (var j = 0; j < ps.length; j++) {
+      var pos = racePos(ps[j]);
+      drawKart(ps[j], pos.x, pos.y, pos.s, t);
+    }
+  }
+
+  function bodyPath(t, R) {
+    ctx.beginPath();
+    for (var i = 0; i <= 48; i++) {
+      var a = i / 48 * Math.PI * 2;
+      var r = R + Math.sin(a * 6 + t / 260) * 7 + Math.sin(t / 420) * 5;
+      var x = Math.cos(a) * r, y = Math.sin(a) * r * 0.95;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  }
+
+  function drawMonster(t) {
+    var R = 195, sc = 1, ox = 0, oy = 0;
+    if (boss.defeated && banner) { var k = Math.min(1, (t - banner.at) / 900); sc = 1 - 0.5 * k; oy = 140 * k; }
+    if (boss.laugh && banner) oy = Math.abs(Math.sin(t / 110)) * -22;
+    var hitK = Math.max(0, 1 - (t - boss.hitAt) / 160);
+    ox = (Math.random() - 0.5) * 14 * hitK;
+    var charging = !!(task && task.kind === 'shield' && (state === 'intro' || state === 'active'));
+    var squash = boss.wob * 0.07 * Math.sin(t / 30);
+
+    ctx.save();
+    ctx.translate(MONSTER_X + ox, MONSTER_Y + oy);
+    ctx.scale(sc * (1 + squash), sc * (1 - squash));
+    ctx.fillStyle = 'rgba(0,0,0,0.3)'; ellipse(0, R * 0.98, R * 0.9, 24); ctx.fill();
+    // horns
+    ctx.fillStyle = '#ffd166';
+    ctx.beginPath(); ctx.moveTo(-125, -110); ctx.lineTo(-160, -250); ctx.lineTo(-55, -170); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(125, -110); ctx.lineTo(160, -250); ctx.lineTo(55, -170); ctx.closePath(); ctx.fill();
+    // feet
+    ctx.fillStyle = '#5a1fc2'; ellipse(-95, R * 0.86, 58, 30); ctx.fill(); ellipse(95, R * 0.86, 58, 30); ctx.fill();
+    // body
+    bodyPath(t, R); ctx.fillStyle = '#7b2ff7'; ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.12)'; ellipse(0, 75, R * 0.62, R * 0.5); ctx.fill();
+    // spots
+    ctx.fillStyle = 'rgba(255,255,255,0.10)'; circle(-130, 10, 18); ctx.fill(); circle(140, 40, 14); ctx.fill(); circle(110, -100, 10); ctx.fill();
+    // eye
+    var eyeY = -55;
+    ctx.fillStyle = '#fff'; circle(0, eyeY, 64); ctx.fill();
+    if (boss.defeated) {
+      ctx.strokeStyle = '#1b1035'; ctx.lineWidth = 12; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(-28, eyeY - 28); ctx.lineTo(28, eyeY + 28); ctx.moveTo(28, eyeY - 28); ctx.lineTo(-28, eyeY + 28); ctx.stroke();
+    } else {
+      var px = -22 + Math.sin(t / 900) * 8, py = eyeY + Math.sin(t / 700) * 8;
+      ctx.fillStyle = '#1b1035'; circle(px, py, 28); ctx.fill();
+      ctx.fillStyle = '#fff'; circle(px - 9, py - 10, 8); ctx.fill();
+    }
+    // brow
+    if (charging || boss.laugh) {
+      ctx.strokeStyle = '#3c1380'; ctx.lineWidth = 16; ctx.lineCap = 'round';
+      ctx.beginPath();
+      if (charging) { ctx.moveTo(-70, eyeY - 92); ctx.lineTo(70, eyeY - 62); }
+      else { ctx.moveTo(-70, eyeY - 70); ctx.quadraticCurveTo(0, eyeY - 110, 70, eyeY - 70); }
+      ctx.stroke();
+    }
+    // mouth
+    var open = charging ? 0.75 + 0.15 * Math.sin(t / 90) : boss.laugh ? 0.8 + 0.2 * Math.sin(t / 110) : 0.25 + hitK * 0.5;
+    var mh = 60 * open + 10, my = 85;
+    ctx.fillStyle = '#2a0d4f'; ellipse(0, my, 95, mh); ctx.fill();
+    ctx.fillStyle = '#fff';
+    for (var i = 0; i < 6; i++) {
+      var tx = -72 + i * 26, ty = my - mh * 0.85;
+      ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(tx + 13, ty + 18); ctx.lineTo(tx + 26, ty); ctx.closePath(); ctx.fill();
+    }
+    if (charging) {
+      var c = colorById(task.color);
+      ctx.globalAlpha = 0.35; ctx.fillStyle = c.hex; circle(0, my, 58 + 8 * Math.sin(t / 70)); ctx.fill();
+      ctx.globalAlpha = 1; circle(0, my, 34); ctx.fill();
+      symbol(c.shape, 0, my, 15);
+    }
+    // bandage when hurt
+    if (boss.max && boss.hp / boss.max < 0.4 && !boss.defeated) {
+      ctx.save(); ctx.translate(120, -115); ctx.rotate(-0.5);
+      ctx.fillStyle = '#f4e4c1'; rr(-42, -13, 84, 26, 8); ctx.fill();
+      ctx.fillStyle = 'rgba(0,0,0,0.15)'; rr(-10, -13, 20, 26, 3); ctx.fill();
+      ctx.restore();
+    }
+    if (hitK > 0) { bodyPath(t, R); ctx.fillStyle = 'rgba(255,255,255,' + (hitK * 0.5) + ')'; ctx.fill(); }
+    ctx.restore();
+  }
+
+  function drawBoss(t) {
+    // arena floor
+    ctx.fillStyle = '#262040'; rr(60, 300, W - 120, H - 370, 24); ctx.fill();
+    drawMonster(t);
+    // health bar
+    var ratio = boss.max ? clamp(boss.hp / boss.max, 0, 1) : 1;
+    var bx = 860, by = 234, bw = 620, bh = 36;
+    ctx.fillStyle = '#14121f'; rr(bx - 6, by - 6, bw + 12, bh + 12, 14); ctx.fill();
+    ctx.fillStyle = ratio > 0.5 ? '#06d6a0' : ratio > 0.25 ? '#ffd166' : '#ef476f';
+    if (ratio > 0) { rr(bx, by, Math.max(bh, bw * ratio), bh, 10); ctx.fill(); }
+    ctx.fillStyle = '#ef476f'; circle(bx - 34, by + bh / 2, 20); ctx.fill();
+    text('♥', bx - 34, by + bh / 2 + 10, 28, '#fff');
+    // time left
+    if (state !== 'banner') {
+      var left = clamp((boss.endAt - now()) / BOSS_TIME_MS, 0, 1);
+      ctx.fillStyle = 'rgba(255,255,255,0.12)'; rr(bx, by + bh + 12, bw, 8, 4); ctx.fill();
+      ctx.fillStyle = left < 0.2 ? '#ef476f' : '#b9b3c9'; rr(bx, by + bh + 12, Math.max(8, bw * left), 8, 4); ctx.fill();
+    }
+    var ps = list();
+    for (var i = 0; i < ps.length; i++) {
+      var s = bossSlot(i, ps.length);
+      drawKart(ps[i], s.x, s.y, s.s, t);
+    }
+  }
+
+  function drawShots(t) {
+    for (var i = 0; i < shots.length; i++) {
+      var sh = shots[i];
+      var k = clamp((t - sh.t0) / sh.dur, 0, 1);
+      var x = sh.x0 + (sh.x1 - sh.x0) * k;
+      var y = sh.y0 + (sh.y1 - sh.y0) * k - Math.sin(k * Math.PI) * (sh.kind === 'fire' ? 60 : 90);
+      if (sh.kind === 'fire') {
+        ctx.globalAlpha = 0.4; ctx.fillStyle = sh.color; circle(x, y, 34 + Math.random() * 6); ctx.fill();
+        ctx.globalAlpha = 1; circle(x, y, 20); ctx.fill();
+      } else {
+        var r = sh.kind === 'big' ? 28 : 14;
+        ctx.fillStyle = sh.color; starPath(x, y, r, t / 80); ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.stroke();
+      }
+    }
+  }
+
+  function drawParticles() {
+    for (var i = 0; i < particles.length; i++) {
+      var pa = particles[i];
+      ctx.globalAlpha = Math.max(0, pa.life / pa.max) * 0.9;
+      ctx.fillStyle = pa.color;
+      if (pa.sq) ctx.fillRect(pa.x - pa.r / 2, pa.y - pa.r / 2, pa.r, pa.r * 0.6);
+      else { circle(pa.x, pa.y, pa.r); ctx.fill(); }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawFloaters(t) {
+    for (var i = 0; i < floaters.length; i++) {
+      var f = floaters[i], k = (t - f.at) / (f.until - f.at);
+      ctx.globalAlpha = 1 - k;
+      text(f.text, f.x, f.y - k * 60, 54, f.color);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawTaskIcon(kind, c, x, y, t) {
+    if (kind === 'tap') {
+      var ring = (t / 600) % 1;
+      ctx.globalAlpha = 1 - ring; ctx.strokeStyle = c.hex; ctx.lineWidth = 6;
+      circle(x, y, 60 + ring * 30); ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = c.hex; circle(x, y, 58 - Math.abs(Math.sin(t / 110)) * 6); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.85)'; circle(x, y, 16); ctx.fill();
+    } else if (kind === 'shake') {
+      ctx.save(); ctx.translate(x, y); ctx.rotate(Math.sin(t / 70) * 0.35);
+      ctx.fillStyle = '#f4f1ea'; rr(-34, -58, 68, 116, 14); ctx.fill();
+      ctx.fillStyle = '#14121f'; rr(-26, -46, 52, 86, 6); ctx.fill();
+      ctx.fillStyle = '#ff9f1c'; rr(-18, 10, 36, 20, 4); ctx.fill();
+      ctx.restore();
+      ctx.strokeStyle = '#ff9f1c'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.arc(x, y, 80, -0.5, 0.5); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, 80, Math.PI - 0.5, Math.PI + 0.5); ctx.stroke();
+    } else {
+      ctx.fillStyle = c.hex; shieldPath(x, y, 72); ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 5; ctx.stroke();
+      symbol(c.shape, x, y - 4, 24);
+    }
+  }
+
+  function drawTaskPanel(t) {
+    if (!task || (state !== 'intro' && state !== 'active')) return;
+    var c = colorById(task.color);
+    var pw = 980, ph = 190, px = (W - pw) / 2, py = 18;
+    var pop = state === 'intro' ? Math.min(1, (t - stateAt) / 220) : 1;
+    ctx.save();
+    ctx.translate(W / 2, py + ph / 2); ctx.scale(0.8 + 0.2 * pop, 0.8 + 0.2 * pop); ctx.translate(-W / 2, -(py + ph / 2));
+    ctx.fillStyle = 'rgba(13,11,22,0.88)'; rr(px, py, pw, ph, 28); ctx.fill();
+    ctx.strokeStyle = task.kind === 'shake' ? '#ff9f1c' : c.hex; ctx.lineWidth = 6; ctx.stroke();
+    drawTaskIcon(task.kind, c, px + 130, py + 95, t);
+
+    var tx = px + 260, ty = py + 108;
+    if (task.kind === 'shield') {
+      ctx.font = '900 76px system-ui, sans-serif';
+      var w1 = ctx.measureText('PERISAI ').width;
+      text('PERISAI ', tx, ty, 76, '#f4f1ea', 'left', 900);
+      text(c.name, tx + w1, ty, 76, c.hex, 'left', 900);
+    } else {
+      text(task.kind === 'tap' ? 'TEKAN!' : 'GOYANG!', tx, ty, 84, task.kind === 'tap' ? c.hex : '#ff9f1c', 'left', 900);
+    }
+    var sub = state === 'intro' ? 'Siap-siap…'
+      : task.kind === 'tap' ? 'Tekan tombolnya secepat mungkin!'
+      : task.kind === 'shake' ? 'Goyangkan HP-mu kuat-kuat!'
+      : mode === 'boss' ? 'Monster mau menyerang! Pilih perisai yang sama!' : 'Pilih perisai yang sama!';
+    text(sub, tx, ty + 50, 30, '#b9b3c9', 'left', 600);
+
+    if (state === 'intro') {
+      text(String(Math.max(1, Math.ceil((stateUntil - t) / 1000))), px + pw - 80, py + 125, 96, '#f4f1ea', 'center', 900);
+    } else {
+      var left = clamp((stateUntil - t) / TASK_MS[task.kind], 0, 1);
+      ctx.fillStyle = 'rgba(255,255,255,0.12)'; rr(px + 24, py + ph - 24, pw - 48, 10, 5); ctx.fill();
+      ctx.fillStyle = task.kind === 'shake' ? '#ff9f1c' : c.hex; rr(px + 24, py + ph - 24, Math.max(10, (pw - 48) * left), 10, 5); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawTitle(t) {
+    if (state !== 'title') return;
+    var k = Math.min(1, (t - stateAt) / 300);
+    ctx.fillStyle = 'rgba(13,11,22,' + (0.6 * k) + ')';
+    ctx.fillRect(0, 0, W, H);
+    ctx.save();
+    ctx.translate(W / 2, H / 2); ctx.scale(0.6 + 0.4 * k, 0.6 + 0.4 * k);
+    text(mode === 'race' ? 'BALAPAN!' : 'LAWAN MONSTER!', 0, 0, 130, mode === 'race' ? '#ffd166' : '#c77dff', 'center', 900);
+    text(mode === 'race' ? 'Siapa paling cepat sampai finish?' : 'Kalahkan monster bersama-sama!', 0, 70, 40, '#f4f1ea', 'center', 600);
+    ctx.restore();
+  }
+
+  function drawBanner(t) {
+    if (state !== 'banner' || !banner) return;
+    var k = Math.min(1, (t - banner.at) / 300);
+    var hh = banner.podium ? 390 : 260;
+    ctx.fillStyle = 'rgba(13,11,22,' + (0.8 * k) + ')';
+    ctx.fillRect(0, H / 2 - hh / 2, W, hh);
+    var top = H / 2 - hh / 2;
+    text(banner.title, W / 2, top + 120, 100, banner.color, 'center', 900);
+    text(banner.sub, W / 2, top + 175, 36, '#f4f1ea', 'center', 600);
+    if (banner.podium) {
+      var n = banner.podium.length, gap = 380, x0 = W / 2 - (n - 1) * gap / 2;
+      for (var i = 0; i < n; i++) {
+        var e = banner.podium[i];
+        ctx.fillStyle = e.color; circle(x0 + i * gap - 120, top + 268, 16); ctx.fill();
+        text((i + 1) + '. ' + e.name, x0 + i * gap - 95, top + 279, 32, '#f4f1ea', 'left', 700);
+        if (e.add) text('+' + e.add + '★', x0 + i * gap - 95, top + 318, 28, '#ffd166', 'left', 800);
+      }
+    }
+    text('Ronde berikutnya ' + Math.max(1, Math.ceil((stateUntil - t) / 1000)) + '…', W / 2, top + hh - 18, 24, '#b9b3c9', 'center', 500);
+  }
+
+  function drawToasts(t) {
+    for (var i = 0; i < toasts.length; i++) {
+      var to = toasts[i];
+      ctx.globalAlpha = clamp((to.until - t) / 400, 0, 1);
+      var y = H - 110 - i * 52;
+      ctx.font = '700 28px system-ui, sans-serif';
+      var w = ctx.measureText(to.text).width + 44;
+      ctx.fillStyle = 'rgba(13,11,22,0.85)'; rr(30, y - 34, w, 46, 23); ctx.fill();
+      ctx.fillStyle = to.color; circle(52, y - 11, 9); ctx.fill();
+      text(to.text, 70, y - 1, 28, '#f4f1ea', 'left', 700);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawBottomBar() {
+    text('Gabung: ' + location.host + '/play   kode ' + pretty, 30, H - 24, 24, 'rgba(244,241,234,0.6)', 'left', 500);
+    var ranked = list().filter(function (p) { return p.stars > 0; }).sort(function (a, b) { return b.stars - a.stars; }).slice(0, 5);
+    var x = W - 30;
+    for (var i = ranked.length - 1; i >= 0; i--) {
+      var label = ranked[i].name + ' ' + ranked[i].stars + '★';
+      ctx.font = '700 24px system-ui, sans-serif';
+      var w = ctx.measureText(label).width;
+      text(label, x, H - 24, 24, ranked[i].color, 'right', 700);
+      x -= w + 34;
+    }
+  }
+
+  function draw() {
+    var t = now();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#0d0b16';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(scale, 0, 0, scale, offX, offY);
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+
+    if (mode === 'boss' && state !== 'lobby') drawBoss(t); else drawRace(t);
+    drawShots(t);
+    drawParticles();
+    drawFloaters(t);
+    drawTaskPanel(t);
+    drawTitle(t);
+    drawBanner(t);
+    drawToasts(t);
+    drawBottomBar();
+
+    lobbyEl.className = state === 'lobby' ? 'lobby' : 'lobby hidden';
+    var cd = state === 'lobby' && lobbyStartAt
+      ? 'Mulai dalam ' + Math.max(1, Math.ceil((lobbyStartAt - t) / 1000)) + '…'
+      : '';
+    if (cd !== countdownText) { countdownText = cd; countdownEl.textContent = cd; }
+  }
+
+  var last = now();
+  function frame() {
+    var t = now();
+    var dt = Math.min(0.05, (t - last) / 1000);
+    last = t;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // Expose for debugging in the console.
+  window.tvp = { room: room, players: players, start: startRound, state: function () { return { state: state, mode: mode, task: task, boss: boss }; } };
+})();
+</script>
+</body>
+</html>

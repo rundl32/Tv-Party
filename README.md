@@ -9,8 +9,25 @@ Hosted entirely on **Vercel** (static pages + a WebSocket Function), with **Redi
 ```
 
 The TV page opens a room with a 6-digit code and a QR code. Phones scan it (or open `/play`
-and type the code), get a joystick and a DASH button, and the TV runs the game. The included
-game, *Star Grab*, works like this: grab stars, dash into friends to steal a point, and the first to 15 wins.
+and type the code) and the TV runs the game. The TV tells each phone which controller to show,
+so `/play` works for every game. Two games are included:
+
+- **Star Grab** (`/tv`): a joystick and a DASH button. Grab stars, dash into friends to steal a point,
+  and the first to 15 wins.
+- **Monster Masher** (`/masher`): made for kids, with Indonesian on-screen words, big colours and icons,
+  and very little reading. Rounds alternate between **Balapan** (a kart race to the finish line) and
+  **Lawan Monster** (everyone fights a giant monster with a health bar before the time runs out). Each
+  round is a chain of short challenges that the phone shows one at a time:
+  - **TEKAN!** Mash the big coloured button to drive or punch.
+  - **GOYANG!** Shake the phone to fill the rocket meter. Rubbing the screen also works, for phones
+    without motion sensors and for plain-http dev, where browsers block the accelerometer.
+  - **PERISAI** Pick the shield that matches the TV (each colour also has its own shape). In a race, a
+    correct shield gives a boost and a wrong one spins you out. In a monster fight, the right shield blocks
+    the attack; everyone else gets dizzy and the monster heals.
+
+  Race podium and monster wins give ★ stars, which carry over between rounds.
+
+Switching games in the same TV browser tab keeps the room code, so phones follow along without re-joining.
 
 ## Deploy to Vercel
 
@@ -39,7 +56,8 @@ npm run dev            # http://localhost:3000/tv
 
 The console prints `http://<your-LAN-ip>:3000/tv` and `/play` URLs. Open the TV page through the
 LAN address (not `localhost`) so its QR code points somewhere phones on the same Wi-Fi can reach.
-On a laptop, the controller also accepts arrow keys/WASD plus Space.
+On a laptop, the controller also accepts arrow keys/WASD plus Space (Star Grab), or Space = tap,
+S = shake, 1–4 = shield (Monster Masher). On the TV, Enter/OK starts Monster Masher straight from the lobby.
 
 Tests (the second run simulates the TV and phones landing on *different* Vercel instances):
 
@@ -57,7 +75,8 @@ REDIS_URL=redis://localhost:6379 npm test
 | `lib/bus.js` | Redis pub/sub bus, with an in-memory fallback |
 | `api/qr.js` | `/api/qr?room=123456` returns an SVG QR code for the join link |
 | `public/tv.html` | TV page: lobby + the Star Grab game (canvas) |
-| `public/play.html` | Phone controller: joystick + button, vibration, wake lock |
+| `public/masher.html` | TV page: lobby + the Monster Masher game (canvas) |
+| `public/play.html` | Phone controller for every game: joystick + button (Star Grab) or tap / shake / shield (Monster Masher), vibration, wake lock |
 | `public/net.js` | Reconnecting WebSocket client used by both pages |
 | `dev.js` | Local server that mirrors the Vercel routes |
 
@@ -73,9 +92,20 @@ The server only relays JSON. The TV page decides everything.
 | server → TV | `{t:'leave', from, cid}` | Ignore it if `cid` is older than the player's latest connection |
 | TV → phones | `{t:'screen-online'}` | Broadcast. Phones re-send `join` |
 | TV → one phone | `{..., to: playerId}` | e.g. `welcome`, `score`, `buzz` (vibrate) |
+| TV → one phone | `{t:'welcome', game, color, name, score}` | `game` picks the controller: missing = joystick, `'masher'` = Monster Masher |
 
-To make a new game, copy `tv.html`, keep the networking block, and replace the simulation and rendering.
-To change the controller layout (e.g. 4 buttons or a d-pad), edit `play.html` and the `in` message.
+Monster Masher adds:
+
+| Direction | Message | Notes |
+|---|---|---|
+| TV → phones | `{t:'task', kind, color, options, delay, ms}` | `kind` is `tap`, `shake`, `shield` or `wait` (with `icon`). The phone shows "SIAP…" for `delay` ms, then accepts input for `ms` ms |
+| phone → TV | `{t:'act', k:'tap'}` | One per tap. The TV counts at most 14 actions per second per player |
+| phone → TV | `{t:'act', k:'shake', p}` | Shake strength 0..1, sent every 100 ms while shaking |
+| phone → TV | `{t:'act', k:'pick', c}` | Chosen shield colour (`red`, `blue`, `green` or `yellow`). The TV answers `{t:'res', ok}` |
+
+To make a new game, copy `tv.html` (or `masher.html`), keep the networking block, and replace the simulation
+and rendering. To add a new controller layout, add a screen to `play.html` and have your TV send its
+`game` name in `welcome`.
 
 ## Things to know
 

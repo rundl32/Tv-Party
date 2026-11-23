@@ -28,7 +28,18 @@
   button:disabled { opacity: .5; }
   .err { color: #ef476f; min-height: 20px; font-size: 15px; }
 
-  /* pad */
+  /* top bar, shared by every game controller */
+  .topbar { position: fixed; top: 0; left: 0; right: 0; display: none; justify-content: space-between; align-items: center;
+            padding: 10px 14px; padding-top: max(10px, env(safe-area-inset-top)); pointer-events: none; z-index: 3; }
+  body.ingame .topbar { display: flex; }
+  .me { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+  .dot { width: 16px; height: 16px; border-radius: 50%; background: var(--me, #06d6a0); }
+  .score { font-weight: 800; font-size: 20px; }
+  .net { font-size: 12px; padding: 3px 8px; border-radius: 99px; background: #2e2a45; color: #b9b3c9; }
+  .net.bad { background: #ef476f; color: #fff; }
+  .leave { pointer-events: auto; background: transparent; color: #6f6888; font-size: 13px; padding: 4px 8px; font-weight: 500; }
+
+  /* Star Grab pad: joystick + button */
   #pad { flex-direction: row; }
   @media (orientation: portrait) { #pad { flex-direction: column; } }
   .zone { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; }
@@ -43,14 +54,37 @@
          color: #14121f; font-weight: 900; font-size: 30px; display: flex; align-items: center; justify-content: center;
          box-shadow: 0 10px 0 rgba(0,0,0,.35); transition: transform .05s, box-shadow .05s; pointer-events: none; }
   .btn.down { transform: translateY(8px) scale(.97); box-shadow: 0 2px 0 rgba(0,0,0,.35); }
-  .topbar { position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center;
-            padding: 10px 14px; padding-top: max(10px, env(safe-area-inset-top)); pointer-events: none; z-index: 2; }
-  .me { display: flex; align-items: center; gap: 8px; font-weight: 700; }
-  .dot { width: 16px; height: 16px; border-radius: 50%; background: var(--me, #06d6a0); }
-  .score { font-weight: 800; font-size: 20px; }
-  .net { font-size: 12px; padding: 3px 8px; border-radius: 99px; background: #2e2a45; color: #b9b3c9; }
-  .net.bad { background: #ef476f; color: #fff; }
-  .leave { pointer-events: auto; background: transparent; color: #6f6888; font-size: 13px; padding: 4px 8px; font-weight: 500; }
+
+  /* Monster Masher: one big action at a time, told by the TV */
+  #masher { align-items: stretch; justify-content: stretch; padding-top: calc(max(10px, env(safe-area-inset-top)) + 44px); }
+  .mtimer { position: absolute; top: calc(max(10px, env(safe-area-inset-top)) + 40px); left: 16px; right: 16px; height: 10px;
+            border-radius: 5px; background: #2e2a45; overflow: hidden; visibility: hidden; }
+  .mtimer.on { visibility: visible; }
+  .mtimer-fill { height: 100%; width: 100%; background: var(--task, #06d6a0); }
+  .mpane { flex: 1; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 16px; }
+  .mpane.on { display: flex; }
+  .memoji { font-size: 110px; line-height: 1; }
+  .mtext { font-size: 36px; font-weight: 900; letter-spacing: .04em; text-align: center; }
+  .mhint { font-size: 15px; color: #6f6888; text-align: center; }
+  .tapbtn { width: min(74vw, 56vh, 360px); height: min(74vw, 56vh, 360px); border-radius: 50%; background: var(--task, #ef476f);
+            display: flex; align-items: center; justify-content: center; font-size: min(26vw, 20vh, 120px);
+            box-shadow: 0 14px 0 rgba(0,0,0,.35), inset 0 -12px 0 rgba(0,0,0,.15); transition: transform .05s, box-shadow .05s; }
+  .tapbtn.hit { transform: translateY(10px) scale(.95); box-shadow: 0 4px 0 rgba(0,0,0,.35), inset 0 -6px 0 rgba(0,0,0,.15); }
+  .shakephone { font-size: 120px; line-height: 1; animation: wiggle .3s ease-in-out infinite alternate; }
+  @keyframes wiggle { from { transform: rotate(-20deg); } to { transform: rotate(20deg); } }
+  .meter { width: min(80vw, 420px); height: 36px; border-radius: 18px; background: #2e2a45; overflow: hidden; }
+  .meter-fill { height: 100%; width: 0; background: linear-gradient(90deg, #ff9f1c, #ffd166); transition: width .1s; }
+  .shields { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .shield { position: relative; background: transparent; padding: 6px; border-radius: 22px; border: 4px solid transparent; }
+  .shield svg { width: min(36vw, 24vh, 170px); height: auto; display: block; }
+  .shield.picked { border-color: #f4f1ea; }
+  .shields.done .shield:not(.picked) { opacity: .3; }
+  .mark { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 90px; font-weight: 900;
+          text-shadow: 0 4px 0 rgba(0,0,0,.5); }
+  .mready { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column;
+            background: rgba(20,18,31,.78); font-size: 56px; font-weight: 900; z-index: 2; }
+  .mready.on { display: flex; }
+  .mready small { font-size: 120px; }
 </style>
 </head>
 <body>
@@ -69,12 +103,13 @@
   </form>
 </div>
 
+<div class="topbar">
+  <div class="me"><span class="dot"></span><span id="meName"></span></div>
+  <div class="score">★ <span id="score">0</span></div>
+  <div><span class="net" id="net">connecting</span><button class="leave" id="leave">Leave</button></div>
+</div>
+
 <div class="screen" id="pad">
-  <div class="topbar">
-    <div class="me"><span class="dot"></span><span id="meName"></span></div>
-    <div class="score">★ <span id="score">0</span></div>
-    <div><span class="net" id="net">connecting</span><button class="leave" id="leave">Leave</button></div>
-  </div>
   <div class="zone stickzone" id="stickZone">
     <div class="base" id="base"></div>
     <div class="knob" id="knob"></div>
@@ -83,6 +118,28 @@
   <div class="zone" id="btnZone">
     <div class="btn" id="btn">DASH</div>
   </div>
+</div>
+
+<div class="screen" id="masher">
+  <div class="mtimer" id="mTimer"><div class="mtimer-fill" id="mTimerFill"></div></div>
+  <div class="mpane on" id="mWait">
+    <div class="memoji" id="mWaitIcon">📺</div>
+    <div class="mtext" id="mWaitText">Lihat TV!</div>
+  </div>
+  <div class="mpane" id="mTap">
+    <div class="tapbtn" id="tapBtn">👆</div>
+    <div class="mtext">TEKAN!</div>
+  </div>
+  <div class="mpane" id="mShake">
+    <div class="shakephone">📳</div>
+    <div class="meter"><div class="meter-fill" id="meter"></div></div>
+    <div class="mtext">GOYANG!</div>
+    <div class="mhint">Tidak bisa goyang? Gosok layarnya cepat-cepat!</div>
+  </div>
+  <div class="mpane" id="mShield">
+    <div class="shields" id="shields"></div>
+  </div>
+  <div class="mready" id="mReady"><small id="mReadyIcon">👀</small>SIAP…</div>
 </div>
 
 <script src="/net.js"></script>
@@ -106,6 +163,7 @@
   });
 
   var sock = null, room = null, name = null, welcomed = false, welcomeTimer = null;
+  var game = 'grab'; // which controller the TV asked for: 'grab' (joystick) or 'masher'
 
   $('form').addEventListener('submit', function (e) {
     e.preventDefault();
@@ -118,6 +176,7 @@
     $('go').textContent = 'Connecting…';
     welcomed = false;
     goFullscreen();
+    askMotion(); // iOS only lets us read the accelerometer after a tap
     connect();
   });
 
@@ -148,7 +207,9 @@
         document.documentElement.style.setProperty('--me', m.color);
         $('meName').textContent = m.name;
         $('score').textContent = m.score || 0;
-        show('pad');
+        game = m.game === 'masher' ? 'masher' : 'grab';
+        if (game === 'masher') onTask({ kind: 'wait', icon: 'tv' });
+        show(game === 'masher' ? 'masher' : 'pad');
         keepAwake();
         lastSent = null; // force a fresh input frame
         break;
@@ -162,6 +223,12 @@
       case 'buzz':
         vibrate(Math.min(400, Number(m.ms) || 30));
         break;
+      case 'task':
+        if (game === 'masher') onTask(m);
+        break;
+      case 'res':
+        if (game === 'masher') onResult(!!m.ok);
+        break;
     }
   }
 
@@ -173,8 +240,9 @@
   }
 
   function show(id) {
-    $('join').className = id === 'join' ? 'screen on' : 'screen';
-    $('pad').className = id === 'pad' ? 'screen on' : 'screen';
+    ['join', 'pad', 'masher'].forEach(function (s) { $(s).className = s === id ? 'screen on' : 'screen'; });
+    document.body.className = id === 'join' ? '' : 'ingame';
+    if (id === 'pad') centerStick(); // the zone had no size while hidden
   }
 
   $('leave').addEventListener('click', function () {
@@ -185,7 +253,7 @@
     $('go').textContent = 'Join';
   });
 
-  // ---------- input ----------
+  // ---------- Star Grab input ----------
   var input = { x: 0, y: 0, a: false };
   var lastSent = null, lastSentAt = 0;
   var MAX_R = 60; // px of drag for full speed
@@ -253,9 +321,14 @@
   btnZone.addEventListener('pointerup', endBtn);
   btnZone.addEventListener('pointercancel', endBtn);
 
-  // Keyboard for testing on a laptop: arrows/WASD + space.
+  // Keyboard for testing on a laptop.
+  //   Star Grab: arrows/WASD + space.   Monster Masher: space = tap, S = shake, 1-4 = shield.
   var keys = {};
-  addEventListener('keydown', function (e) { keys[e.key.toLowerCase()] = true; keyInput(); });
+  addEventListener('keydown', function (e) {
+    keys[e.key.toLowerCase()] = true;
+    if (game === 'masher' && welcomed) masherKey(e);
+    keyInput();
+  });
   addEventListener('keyup', function (e) { keys[e.key.toLowerCase()] = false; keyInput(); });
   function keyInput() {
     if (stick.id !== null || $('pad').className.indexOf('on') < 0) return;
@@ -279,6 +352,190 @@
     }
   }
   setInterval(function () { flush(false); }, 16);
+
+  // ---------- Monster Masher controller ----------
+  // The TV sends {t:'task', kind, color, options, delay, ms}; we show that one action,
+  // greyed out for `delay` ms ("SIAP…"), then live for `ms` ms. We answer with
+  // {t:'act', k:'tap'} / {t:'act', k:'shake', p:0..1} / {t:'act', k:'pick', c:colorId}.
+  var TASK_HEX = { red: '#ef476f', blue: '#4cc9f0', green: '#06d6a0', yellow: '#ffd166' };
+  var WAIT = {
+    tv: ['📺', 'Lihat TV!'], trophy: ['🏆', 'JUARA!'], clap: ['👏', 'Hebat!'],
+    party: ['🎉', 'Monster kalah!'], again: ['😅', 'Coba lagi!']
+  };
+  var SHIELD_PATH = 'M50 4 Q75 14 93 10 Q97 72 50 116 Q3 72 7 10 Q25 14 50 4 Z';
+  var SYMBOL = {
+    red: '<circle cx="50" cy="56" r="17" fill="#fff"/>',
+    blue: '<rect x="34" y="40" width="32" height="32" rx="5" fill="#fff"/>',
+    green: '<polygon points="50,36 70,72 30,72" fill="#fff"/>',
+    yellow: '<polygon points="50,34 56,50 73,50 59,60 64,77 50,67 36,77 41,60 27,50 44,50" fill="#fff"/>'
+  };
+
+  var mt = { kind: 'wait', liveAt: 0, endAt: 0, picked: null, buzzed: false };
+  var shakeAcc = 0, shakeShow = 0;
+
+  function onTask(m) {
+    var t = Date.now();
+    var kind = m.kind === 'tap' || m.kind === 'shake' || m.kind === 'shield' ? m.kind : 'wait';
+    var color = TASK_HEX[m.color] ? m.color : 'red';
+    var delay = Math.max(0, Math.min(5000, Number(m.delay) || 0));
+    var ms = Math.max(0, Math.min(20000, Number(m.ms) || 0));
+    mt = { kind: kind, color: color, liveAt: t + delay, endAt: kind === 'wait' ? 0 : t + delay + ms, picked: null, buzzed: delay === 0 };
+    document.documentElement.style.setProperty('--task', kind === 'shake' ? '#ff9f1c' : TASK_HEX[color]);
+    ['mWait', 'mTap', 'mShake', 'mShield'].forEach(function (id) { $(id).className = 'mpane'; });
+    if (kind === 'wait') {
+      var w = WAIT[m.icon] || WAIT.tv;
+      $('mWaitIcon').textContent = w[0];
+      $('mWaitText').textContent = w[1];
+      $('mWait').className = 'mpane on';
+    } else if (kind === 'tap') {
+      $('mTap').className = 'mpane on';
+    } else if (kind === 'shake') {
+      shakeAcc = 0; shakeShow = 0; $('meter').style.width = '0';
+      $('mShake').className = 'mpane on';
+    } else {
+      renderShields(m.options);
+      $('mShield').className = 'mpane on';
+    }
+    $('mReadyIcon').textContent = kind === 'tap' ? '👆' : kind === 'shake' ? '📳' : '🛡️';
+    tick();
+  }
+
+  function live() {
+    var t = Date.now();
+    return mt.kind !== 'wait' && t >= mt.liveAt && t < mt.endAt + 300;
+  }
+
+  function sendAct(o) {
+    if (!sock) return;
+    o.t = 'act';
+    sock.send(o);
+  }
+
+  // countdown overlay, timer bar, "go!" buzz
+  function tick() {
+    var t = Date.now();
+    var waiting = mt.kind !== 'wait' && t < mt.liveAt;
+    $('mReady').className = waiting ? 'mready on' : 'mready';
+    if (!waiting && !mt.buzzed && mt.kind !== 'wait') { mt.buzzed = true; vibrate(60); }
+    var bar = mt.kind !== 'wait' && !waiting && t < mt.endAt;
+    $('mTimer').className = bar ? 'mtimer on' : 'mtimer';
+    if (bar) $('mTimerFill').style.width = Math.max(0, (mt.endAt - t) / (mt.endAt - mt.liveAt) * 100) + '%';
+  }
+  setInterval(function () { if (game === 'masher') tick(); }, 50);
+
+  // TAP: the whole pane counts, so little fingers can't miss.
+  var tapBtn = $('tapBtn');
+  function doTap() {
+    if (mt.kind !== 'tap' || !live()) return;
+    sendAct({ k: 'tap' });
+    vibrate(12);
+    tapBtn.className = 'tapbtn hit';
+    setTimeout(function () { tapBtn.className = 'tapbtn'; }, 70);
+  }
+  $('mTap').addEventListener('pointerdown', function (e) { doTap(); e.preventDefault(); });
+
+  // SHAKE: accelerometer, with screen-rubbing as a fallback (desktop, plain-http dev, denied permission).
+  var lastG = null;
+  addEventListener('devicemotion', function (e) {
+    if (game !== 'masher' || mt.kind !== 'shake') return;
+    var a = e.acceleration, mag = 0;
+    if (a && a.x !== null && a.x !== undefined) {
+      mag = Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+    } else {
+      var g = e.accelerationIncludingGravity;
+      if (!g || g.x === null || g.x === undefined) return;
+      if (lastG) {
+        var dx = g.x - lastG.x, dy = g.y - lastG.y, dz = g.z - lastG.z;
+        mag = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      }
+      lastG = { x: g.x, y: g.y, z: g.z };
+    }
+    if (mag > 4) shakeAcc += (mag - 4) / 60;
+  });
+
+  var rub = null;
+  var shakePane = $('mShake');
+  shakePane.addEventListener('pointerdown', function (e) { rub = { x: e.clientX, y: e.clientY }; askMotion(); e.preventDefault(); });
+  shakePane.addEventListener('pointermove', function (e) {
+    if (!rub || (e.pointerType === 'mouse' && !e.buttons)) return;
+    var dx = e.clientX - rub.x, dy = e.clientY - rub.y;
+    shakeAcc += Math.sqrt(dx * dx + dy * dy) / 700;
+    rub = { x: e.clientX, y: e.clientY };
+    e.preventDefault();
+  });
+  shakePane.addEventListener('pointerup', function () { rub = null; });
+  shakePane.addEventListener('pointercancel', function () { rub = null; });
+
+  setInterval(function () {
+    if (game !== 'masher' || mt.kind !== 'shake') return;
+    var p = Math.min(1, shakeAcc);
+    shakeAcc = 0;
+    if (!live()) p = 0;
+    shakeShow = shakeShow * 0.6 + p * 0.4;
+    $('meter').style.width = Math.round(shakeShow * 100) + '%';
+    if (p > 0.03) sendAct({ k: 'shake', p: Math.round(p * 100) / 100 });
+  }, 100);
+
+  var motionAsked = false;
+  function askMotion() {
+    if (motionAsked) return;
+    try {
+      if (window.DeviceMotionEvent && typeof DeviceMotionEvent.requestPermission === 'function') {
+        motionAsked = true;
+        DeviceMotionEvent.requestPermission().catch(function () {});
+      }
+    } catch (e) {}
+  }
+
+  // SHIELD: same choices as the TV, shuffled per phone so kids can't just copy.
+  function renderShields(options) {
+    var box = $('shields');
+    box.className = 'shields';
+    box.textContent = '';
+    var ids = (Array.isArray(options) ? options : []).filter(function (c) { return TASK_HEX[c]; });
+    if (!ids.length) ids = Object.keys(TASK_HEX);
+    for (var i = ids.length - 1; i > 0; i--) { var j = Math.floor(Math.random() * (i + 1)); var x = ids[i]; ids[i] = ids[j]; ids[j] = x; }
+    ids.forEach(function (c) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'shield';
+      b.setAttribute('data-c', c);
+      b.innerHTML = '<svg viewBox="0 0 100 120"><path d="' + SHIELD_PATH + '" fill="' + TASK_HEX[c] +
+        '" stroke="#fff" stroke-width="4"/>' + SYMBOL[c] + '</svg>';
+      b.addEventListener('pointerdown', function (e) { pick(b, c); e.preventDefault(); });
+      box.appendChild(b);
+    });
+  }
+
+  function pick(el, c) {
+    if (mt.kind !== 'shield' || mt.picked || !live()) return;
+    mt.picked = c;
+    el.className = 'shield picked';
+    $('shields').className = 'shields done';
+    vibrate(20);
+    sendAct({ k: 'pick', c: c });
+  }
+
+  function onResult(ok) {
+    var el = document.querySelector('.shield.picked');
+    if (!el) return;
+    var mark = document.createElement('div');
+    mark.className = 'mark';
+    mark.textContent = ok ? '✓' : '✗';
+    mark.style.color = ok ? '#06d6a0' : '#ef476f';
+    el.appendChild(mark);
+    vibrate(ok ? 40 : [80, 60, 80]);
+  }
+
+  function masherKey(e) {
+    if (e.repeat && e.key !== 's' && e.key !== 'S') return;
+    if (e.key === ' ' || e.key === 'Spacebar' || e.code === 'Space') { doTap(); e.preventDefault(); }
+    else if (e.key === 's' || e.key === 'S') { if (live()) shakeAcc += 0.35; }
+    else if (/^[1-4]$/.test(e.key) && mt.kind === 'shield') {
+      var b = document.querySelectorAll('.shield')[Number(e.key) - 1];
+      if (b) pick(b, b.getAttribute('data-c'));
+    }
+  }
 
   // ---------- phone niceties ----------
   function vibrate(ms) { try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) {} }

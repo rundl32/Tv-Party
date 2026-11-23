@@ -8,14 +8,15 @@
   * { box-sizing: border-box; }
   body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
          background: #14121f; color: #f4f1ea; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  main { width: min(92vw, 720px); text-align: center; }
+  main { width: min(92vw, 860px); text-align: center; padding: 24px 0; }
   h1 { font-size: clamp(36px, 7vw, 64px); margin: 0 0 8px; letter-spacing: -0.02em; }
   p { color: #b9b3c9; margin: 0 0 32px; font-size: 18px; }
-  .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .12em; color: #6f6888; margin: 0 0 12px; }
+  .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 28px; }
   a { display: block; padding: 32px 16px; border-radius: 20px; text-decoration: none; color: #14121f;
       font-weight: 700; font-size: 24px; outline: none; }
   a span { display: block; font-weight: 400; font-size: 15px; margin-top: 6px; opacity: .75; }
-  a.tv { background: #ffd166; } a.phone { background: #06d6a0; }
+  a.tv { background: #ffd166; } a.masher { background: #c77dff; } a.phone { background: #06d6a0; }
   a:focus, a:hover { box-shadow: 0 0 0 6px #fff; }
   @media (max-width: 520px) { .choices { grid-template-columns: 1fr; } }
 </style>
@@ -24,9 +25,14 @@
 <main>
   <h1>TV Party</h1>
   <p>The TV is the console. Your phones are the controllers.</p>
+  <h2>On the TV, pick a game</h2>
   <div class="choices">
-    <a class="tv" href="/tv" autofocus>Open on TV<span>Shows the game and the join code</span></a>
-    <a class="phone" href="/play">Use as controller<span>Enter the code from the TV</span></a>
+    <a class="tv" href="/tv" autofocus>Star Grab<span>Joystick: grab stars, dash into friends</span></a>
+    <a class="masher" href="/masher">Monster Masher<span>For kids: tap, shake and pick shields to race karts and beat the monster</span></a>
+  </div>
+  <h2>On a phone</h2>
+  <div class="choices" style="grid-template-columns: 1fr;">
+    <a class="phone" href="/play">Use as controller<span>Enter the code from the TV. Works for every game.</span></a>
   </div>
 </main>
 </body>
